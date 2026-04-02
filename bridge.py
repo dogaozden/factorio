@@ -57,8 +57,8 @@ RCON_CONNECT_RETRIES = 60    # how many times to retry RCON connection
 RCON_RETRY_DELAY = 2         # seconds between retries
 MAX_TRANSCRIPT_CHARS = 4000  # max transcript chars to include in prompt
 
-# Deterministic session ID so the same conversation resumes across restarts
-SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "factorio-claude-chat"))
+# Fresh session ID each bridge run — use --continue for subsequent messages
+SESSION_ID = str(uuid.uuid4())
 
 
 # ============================================================
@@ -1275,7 +1275,7 @@ class Bridge:
 
         if self.session_started:
             cmd = [
-                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
                 user_message,
             ]
@@ -1395,7 +1395,7 @@ class Bridge:
 
         if self.session_started:
             cmd = [
-                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
                 user_message,
             ]
@@ -1590,7 +1590,7 @@ class Bridge:
 
         if self.session_started:
             cmd = [
-                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
                 user_message,
             ]
@@ -1647,7 +1647,7 @@ class Bridge:
 
         if self.session_started:
             cmd = [
-                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
                 naming_prompt,
             ]
@@ -1736,7 +1736,7 @@ class Bridge:
 
         if self.session_started:
             cmd = [
-                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
                 user_message,
             ]
