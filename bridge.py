@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,11 +45,13 @@ CLAUDE_BIN = "/opt/homebrew/bin/claude"
 
 POLL_INTERVAL = 0.5          # seconds between file checks
 MAX_RESPONSE_LENGTH = 500    # chars per chat message chunk
-PROMPT_HISTORY = 20          # conversation turns to include in prompt
 CLAUDE_TIMEOUT = 120         # seconds to wait for claude response
 RCON_CONNECT_RETRIES = 60    # how many times to retry RCON connection
 RCON_RETRY_DELAY = 2         # seconds between retries
 MAX_TRANSCRIPT_CHARS = 4000  # max transcript chars to include in prompt
+
+# Deterministic session ID so the same conversation resumes across restarts
+SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "factorio-claude-chat"))
 
 
 # ============================================================
@@ -214,6 +217,9 @@ class Bridge:
         self.transcript: str = ""
         self.last_state: dict | None = None
         self.last_checkin: float = 0
+        self.session_started = False
+        self._cached_state: dict | None = None
+        self._state_lock = threading.Lock()
 
     def init(self):
         """Load persistent state."""
@@ -572,7 +578,7 @@ class Bridge:
             pass
         return None
 
-    def query_game_state(self) -> dict | None:
+    def _fetch_game_state(self) -> dict | None:
         """Query full Factorio game state via multiple RCON commands."""
         if not self.rcon:
             return None
@@ -602,6 +608,30 @@ class Bridge:
         except Exception as exc:
             print(f"  Game state query failed: {exc}")
         return None
+
+    def query_game_state(self) -> dict | None:
+        """Return the cached game state (refreshed every 30s by background poller)."""
+        with self._state_lock:
+            return self._cached_state
+
+    def _state_poll_loop(self):
+        """Background loop: refresh cached game state every 30 seconds."""
+        while True:
+            time.sleep(30)
+            if self._paused:
+                continue
+            state = self._fetch_game_state()
+            if state is not None:
+                with self._state_lock:
+                    self._cached_state = state
+                tick = state.get("game_time", "?")
+                print(f"  [state poller] refreshed (game time: {tick})")
+
+    def _start_state_poller(self):
+        """Start the background game-state polling thread."""
+        t = threading.Thread(target=self._state_poll_loop, daemon=True)
+        t.start()
+        print("State poller started (30s interval)")
 
     @staticmethod
     def format_game_context(state: dict) -> str:
@@ -1089,11 +1119,19 @@ class Bridge:
         print("\nWaiting for messages... (Ctrl-C to quit)\n")
 
         # snapshot initial game state for check-in diffs
-        self.last_state = self.query_game_state()
+        self._paused = False
+        initial = self._fetch_game_state()
+        if initial is not None:
+            with self._state_lock:
+                self._cached_state = initial
+            print("  Initial game state fetched.")
+        self.last_state = initial
         self.last_checkin = time.time()
 
+        # start background state poller (before focus watcher)
+        self._start_state_poller()
+
         # start focus watcher (auto-pause on cmd-tab away)
-        self._paused = False
         self._start_focus_watcher()
 
         try:
