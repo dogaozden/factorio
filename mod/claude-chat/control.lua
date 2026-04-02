@@ -2,7 +2,7 @@
 -- Captures player chat messages and provides RCON commands for the bridge.
 --
 -- Usage:
---   !<message>         Send a message to Claude via regular chat
+--   Just type in chat — every message is sent to Claude automatically
 --   /claude <message>  Send a message to Claude via command
 --
 -- The bridge reads messages from script-output/claude_chat.jsonl
@@ -184,7 +184,7 @@ commands.add_command("claude-status", "Check if the Claude bridge is connected",
     if cmd.player_index then
         game.get_player(cmd.player_index).print(
             "[color=200,200,200]Claude Chat mod is loaded. "
-            .. "If you see responses to !messages, the bridge is connected.[/color]"
+            .. "If you see responses to your messages, the bridge is connected.[/color]"
         )
     end
 end)
