@@ -614,6 +614,73 @@ class Bridge:
         with self._state_lock:
             return self._cached_state
 
+    def _check_critical_alerts(self, old_state: dict | None, new_state: dict):
+        """Compare states and return list of critical alert strings, or empty."""
+        if old_state is None:
+            return []
+
+        alerts = []
+
+        # Empty turrets (new empties since last poll)
+        new_def = new_state.get("defenses", {})
+        old_def = old_state.get("defenses", {})
+        new_empty = new_def.get("empty", {})
+        old_empty = old_def.get("empty", {})
+        for coord, count in new_empty.items():
+            if count > old_empty.get(coord, 0):
+                alerts.append(f"EMPTY turrets at ({coord})! {count} with no ammo")
+
+        # Walls destroyed (count dropped)
+        new_tw = new_def.get("tw", 0)
+        old_tw = old_def.get("tw", 0)
+        if old_tw > 0 and new_tw < old_tw:
+            alerts.append(f"Walls destroyed! {old_tw - new_tw} walls lost")
+
+        # New damaged walls
+        new_dmg = new_def.get("damaged", {})
+        old_dmg = old_def.get("damaged", {})
+        for coord, count in new_dmg.items():
+            if count > old_dmg.get(coord, 0):
+                alerts.append(f"Walls taking damage near ({coord})!")
+
+        # Trains stuck
+        new_trains = new_state.get("trains", {})
+        old_trains = old_state.get("trains", {})
+        if new_trains.get("stuck", 0) > old_trains.get("stuck", 0):
+            for t in new_trains.get("trains", []):
+                if t.get("state") in ("path_lost", "no_path", "no_schedule"):
+                    stops = " -> ".join(t.get("stops", [])) or "no schedule"
+                    alerts.append(
+                        f"Train #{t['id']} stuck ({t['state']}) "
+                        f"at ({t.get('x','?')},{t.get('y','?')}) "
+                        f"route: {stops}"
+                    )
+
+        # Power brownout (electric consumption > generation)
+        new_elec = new_state.get("electric", {})
+        econs = new_elec.get("consumption", {})
+        eprod = new_elec.get("production", {})
+        if econs and eprod:
+            gen = sum(econs.values())  # naming is swapped in Factorio API
+            use = sum(eprod.values())
+            if gen > 0 and use / gen > 0.95:
+                pct = round(use / gen * 100)
+                alerts.append(f"Power critical! Using {pct}% of generation capacity")
+
+        # No research set
+        if (new_state.get("current_research", "none") == "none"
+                and old_state.get("current_research", "none") != "none"):
+            alerts.append("Research finished and nothing queued!")
+
+        return alerts
+
+    def _send_alert(self, alerts: list[str]):
+        """Send critical alerts directly to game chat. No Claude call."""
+        for alert in alerts:
+            msg = f"[ALERT] {alert}"
+            print(f"  !!! {msg}")
+            self.send_to_game(msg)
+
     def _state_poll_loop(self):
         """Background loop: refresh cached game state every 30 seconds."""
         while True:
@@ -622,10 +689,15 @@ class Bridge:
                 continue
             state = self._fetch_game_state()
             if state is not None:
+                old_state = self.query_game_state()
+                # Check for critical alerts before updating cache
+                alerts = self._check_critical_alerts(old_state, state)
                 with self._state_lock:
                     self._cached_state = state
                 tick = state.get("game_time", "?")
                 print(f"  [state poller] refreshed (game time: {tick})")
+                if alerts:
+                    self._send_alert(alerts)
 
     def _start_state_poller(self):
         """Start the background game-state polling thread."""
