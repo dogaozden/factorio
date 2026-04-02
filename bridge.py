@@ -1338,11 +1338,19 @@ class Bridge:
                 # Remove trailing punctuation and filler words
                 raw = re.sub(r"[?.!]+$", "", raw).strip()
                 raw = re.sub(r"\s+(?:please|pls|plz|thx|thanks)$", "", raw, flags=re.IGNORECASE).strip()
-                if raw:
-                    # Normalize: lowercase, spaces to hyphens
-                    normalized = raw.lower().replace(" ", "-")
-                    if normalized not in items:
-                        items.append(normalized)
+                if not raw:
+                    continue
+                # Only take the first few words (item names are 1-4 words max)
+                words = raw.split()
+                if len(words) > 5:
+                    continue
+                # Normalize: lowercase, spaces to hyphens
+                normalized = raw.lower().replace(" ", "-")
+                # Sanity check: real item names are short
+                if len(normalized) > 50:
+                    continue
+                if normalized not in items:
+                    items.append(normalized)
         return items
 
     # -- Claude CLI --------------------------------------------------
