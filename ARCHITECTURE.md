@@ -49,20 +49,13 @@ This snapshot is cached so when you send a message, there's no delay waiting for
 
 If something critical is detected, it immediately sends an `[ALERT]` message to your chat. No Claude involved, no delay, no tokens spent.
 
-**Talking to Claude:** When you send a message, the bridge calls the Claude CLI with:
-- Your message
-- A system prompt containing your full factory snapshot
-- Background context (the transcript from your Claude Desktop conversation)
+**Talking to Claude:** When you send a message, the bridge calls the `claude` CLI in print mode (`-p`). The first message uses `--session-id` with a deterministic UUID to start a session. Every subsequent message uses `-r SESSION_ID` to resume that same session, so Claude has the full conversation history in its context. The factory snapshot goes in `--append-system-prompt` (updated each call with fresh data), and the transcript from your Claude Desktop conversation is included on the first call via `--system-prompt`.
 
-Claude sees everything about your factory and responds with context-aware advice. The bridge sends the response back to Factorio over the network, and it appears in your chat.
+**Auto-pause:** A background thread polls `osascript` every 0.5s to check which app is frontmost. When Factorio loses focus, the bridge sends `/sc game.tick_paused = true` via RCON. When it regains focus, unpauses. Also unpauses on bridge exit so your game never gets stuck frozen.
 
-**Remembering conversations:** The bridge uses a persistent Claude session (same session ID across restarts) so Claude remembers what you've talked about. It also saves all messages to disk as a backup.
+**Check-ins:** Every 5 minutes, the bridge diffs the current cached factory snapshot against the one from 5 minutes ago (production deltas, new items, research changes), sends the diff to Claude, and posts a brief observation in chat. Skipped if the game is paused.
 
-**Auto-pause:** When you cmd-tab away from Factorio, the bridge pauses the game. When you tab back, it resumes. This is checked every half second by asking macOS which app is in front.
-
-**Check-ins:** Every 5 minutes, the bridge compares the current factory snapshot to the one from 5 minutes ago, summarizes what changed, and has Claude post a brief observation. Skipped if the game is paused.
-
-**Blueprints:** When you ask Claude for a blueprint, it generates a Factorio blueprint string. The bridge detects it, validates it, saves it to a file, and tells you where to find it so you can import it.
+**Blueprints:** When you ask Claude for a blueprint, it outputs a Factorio blueprint string (the `0` + base64(zlib(json)) format). The bridge detects these via regex, validates by decoding, saves to `~/.claude-factorio/blueprints/latest.txt`, and replaces the raw string in the chat response with import instructions.
 
 ### 3. The Network Connection (RCON)
 
