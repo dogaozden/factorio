@@ -101,9 +101,35 @@ Bridge sends response to Factorio via RCON
 |------|-----------|-------------|-------------|
 | Message watcher | Every 0.5s | Checks file for new chat messages | None (reads a file) |
 | Alert poller | Every 5s | Counts walls/turrets, checks trains and power | Negligible (O(1) lookups) |
-| State poller | Every 30s | Full 15-query factory snapshot | Light (scans entities) |
+| State poller | Every 30s | Full 17-query factory snapshot + biter threat scan | Light (scans entities) |
 | Focus watcher | Every 0.5s | Checks if Factorio is frontmost app | None (asks macOS) |
 | Check-in | Every 5 min | Has Claude comment on changes | None (uses cached data) |
+| Play-by-play | Every 10 min | Sports-commentator narration of last 10 min | None (uses cached data, replaces check-in) |
+
+## Special Commands
+
+| Command | What it does |
+|---------|-------------|
+| `/ss` or `/ss <question>` | Takes a screenshot, sends it to Claude for visual analysis |
+| `goal: <description>` | Adds a goal (e.g. "goal: launch a rocket"). Claude tracks progress in check-ins. |
+| `goal: done` | Clears all goals. `goal: done <name>` removes a specific one. |
+| `rename my factory` | Claude assigns fun, unhinged names to your trains, areas, and infrastructure |
+
+## Features
+
+**Screenshot analysis:** `/ss` triggers `game.take_screenshot` via RCON, saves to `script-output/`, then passes the image path to Claude via the persistent session. Claude uses its `Read` tool to see the image. You can add a question: `/ss what's wrong with my smelting?`
+
+**Goal tracking:** Goals persist in `~/.claude-factorio/goals.json`. Claude sees them in every system prompt and references progress in check-ins and narrations.
+
+**Ratio calculator:** Claude has assembler/furnace speed formulas and your force's productivity bonuses in its system prompt. Ask "how many assemblers for 60 blue science/min?" and it calculates with your actual game modifiers.
+
+**Biter threat radar:** Every 30s, scans for enemies within 200/400/600 tiles of the player and the 5 nearest biter nests. Alerts with compass direction: "12 enemies approaching from the northeast, 180 tiles out!"
+
+**Factory naming:** Claude names your trains, production areas, and infrastructure with fun, unhinged names. Names persist across sessions and Claude uses them in all conversations.
+
+**Play-by-play narration:** Every 10 minutes, Claude narrates what happened in a dramatic sports commentary style, referencing specific numbers and factory names.
+
+**Voice input (SuperWhisper):** No code needed. Open Factorio chat, press SuperWhisper hotkey, speak. It auto-pastes the transcription. Run Factorio in borderless windowed mode.
 
 ## Files
 
@@ -114,4 +140,7 @@ Bridge sends response to Factorio via RCON
 | `~/.claude-factorio/history.jsonl` | Home dir | All conversation history (persists forever) |
 | `~/.claude-factorio/transcript.txt` | Home dir | Claude Desktop conversation context |
 | `~/.claude-factorio/blueprints/` | Home dir | Saved blueprint strings |
+| `~/.claude-factorio/goals.json` | Home dir | Player's tracked goals |
+| `~/.claude-factorio/factory_names.json` | Home dir | Fun names for trains/areas |
 | `~/Library/Application Support/factorio/script-output/claude_chat.jsonl` | Factorio dir | Mod's message output (runtime only) |
+| `~/Library/Application Support/factorio/script-output/claude_screenshot.png` | Factorio dir | Latest screenshot for analysis |
