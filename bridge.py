@@ -44,6 +44,7 @@ PERSIST_DIR = Path.home() / ".claude-factorio"
 HISTORY_FILE = PERSIST_DIR / "history.jsonl"
 TRANSCRIPT_FILE = PERSIST_DIR / "transcript.txt"
 BLUEPRINT_DIR = PERSIST_DIR / "blueprints"
+FACTORY_NAMES_FILE = PERSIST_DIR / "factory_names.json"
 
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 
@@ -228,6 +229,7 @@ def decode_blueprint(blueprint_string: str) -> dict:
 # ============================================================
 
 CHECKIN_INTERVAL = 300        # seconds between auto check-ins
+NARRATION_INTERVAL = 600      # seconds between play-by-play narrations
 
 
 class Bridge:
@@ -238,10 +240,13 @@ class Bridge:
         self.transcript: str = ""
         self.last_state: dict | None = None
         self.last_checkin: float = 0
+        self.last_narration: float = 0
         self.session_started = False
         self._cached_state: dict | None = None
         self._alert_state: dict | None = None
         self._state_lock = threading.Lock()
+        self.factory_names: dict = {}
+        self._narration_state: dict | None = None
 
     def init(self):
         """Load persistent state."""
@@ -249,6 +254,14 @@ class Bridge:
         BLUEPRINT_DIR.mkdir(parents=True, exist_ok=True)
         self.history = load_history()
         self.transcript = load_transcript()
+
+        # Load factory names if they exist
+        if FACTORY_NAMES_FILE.exists():
+            try:
+                self.factory_names = json.loads(FACTORY_NAMES_FILE.read_text())
+                print(f"  Factory names: {len(self.factory_names)} names loaded")
+            except (json.JSONDecodeError, OSError):
+                self.factory_names = {}
 
         n = len(self.history)
         print(f"  History     : {n} messages loaded from prior sessions")
@@ -1048,6 +1061,13 @@ class Bridge:
             parts.append(self.transcript)
             parts.append("")
 
+        # Include factory names if available
+        if self.factory_names:
+            parts.append("The player's factory areas and infrastructure have been given fun names. USE these names when referring to them:")
+            for original, nickname in self.factory_names.items():
+                parts.append(f"  {original} -> {nickname}")
+            parts.append("")
+
         # Include live game state
         state = self.query_game_state()
         if state and "error" not in state:
@@ -1135,6 +1155,14 @@ class Bridge:
 
         ts = datetime.now(timezone.utc).isoformat()
         print(f"\n>>> [{player}]: {text}")
+
+        # Check for factory rename trigger
+        text_lower = text.lower().strip()
+        if text_lower in ("rename my factory", "name my stuff"):
+            print("  -> Factory naming triggered!")
+            self.send_to_game("On it! Naming your factory...")
+            self._name_factory_areas()
+            return
 
         # Save player message to persistent history
         player_entry = {"role": player, "text": text, "ts": ts}
@@ -1260,6 +1288,149 @@ class Bridge:
         except Exception as exc:
             print(f"  Check-in failed: {exc}")
 
+    # -- Factory naming -----------------------------------------------
+
+    def _name_factory_areas(self):
+        """Ask Claude to assign fun, unhinged names to factory infrastructure."""
+        state = self.query_game_state()
+        if not state or "error" in state:
+            self.send_to_game("Can't see the factory right now — try again in a sec.")
+            return
+
+        context = self.format_game_context(state)
+        naming_prompt = (
+            "Based on this factory state, give fun, unhinged, creative names to "
+            "the player's trains, production areas, and infrastructure. Be creative, "
+            "irreverent, and funny. Format: one per line as 'ORIGINAL -> NEW_NAME'. "
+            "Include trains by their routes, smelting areas, circuit production, "
+            "oil processing, military production, science labs, etc.\n\n"
+            f"Factory state:\n{context}"
+        )
+
+        system_prompt = (
+            "You are a factory naming genius. Your job is to give the most creative, "
+            "unhinged, and hilarious names to parts of a Factorio factory. "
+            "Output ONLY lines in the format 'ORIGINAL -> NEW_NAME', nothing else. "
+            "Give 8-15 names covering the major areas and systems."
+        )
+
+        if self.session_started:
+            cmd = [
+                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                "--append-system-prompt", system_prompt,
+                naming_prompt,
+            ]
+        else:
+            cmd = [
+                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
+                "--system-prompt", system_prompt,
+                naming_prompt,
+            ]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+            )
+            response = result.stdout.strip()
+            if not response:
+                self.send_to_game("Naming failed — Claude had no words (for once).")
+                return
+            self.session_started = True
+
+            # Parse the ORIGINAL -> NEW_NAME lines
+            names = {}
+            for line in response.splitlines():
+                line = line.strip()
+                if " -> " in line:
+                    parts = line.split(" -> ", 1)
+                    if len(parts) == 2:
+                        original = parts[0].strip()
+                        new_name = parts[1].strip()
+                        if original and new_name:
+                            names[original] = new_name
+
+            if not names:
+                self.send_to_game("Naming came back garbled. Try again!")
+                return
+
+            self.factory_names = names
+            FACTORY_NAMES_FILE.write_text(json.dumps(names, indent=2))
+
+            # Announce the names in chat
+            self.send_to_game("Your factory has been NAMED! Here's what we're calling things now:")
+            for original, nickname in names.items():
+                self.send_to_game(f"  {original} -> {nickname}")
+
+            print(f"  Factory names saved: {len(names)} names")
+
+        except subprocess.TimeoutExpired:
+            self.send_to_game("Naming took too long — the factory is too complex for words.")
+        except Exception as exc:
+            print(f"  Factory naming failed: {exc}")
+            self.send_to_game("Naming failed — something went wrong.")
+
+    # -- Play-by-play narration ----------------------------------------
+
+    def do_narration(self):
+        """Sports-commentator-style narration of the last 10 minutes."""
+        state = self.query_game_state()
+        if not state or "error" in state:
+            return
+
+        if self._narration_state is None:
+            self._narration_state = state
+            return
+
+        diff = self.diff_states(self._narration_state, state)
+        self._narration_state = state
+
+        print(f"\n--- [Play-by-play narration] ---\n{diff}")
+
+        system_prompt = self._build_system_prompt()
+
+        names_context = ""
+        if self.factory_names:
+            names_lines = [f"  {k} -> {v}" for k, v in self.factory_names.items()]
+            names_context = "\nFactory nicknames (USE these):\n" + "\n".join(names_lines) + "\n"
+
+        user_message = (
+            "[PLAY-BY-PLAY NARRATION] You are a sports commentator narrating a "
+            "Factorio game. Be dramatic, hype, funny, and unhinged. Based on the "
+            "changes below, give a 2-3 sentence play-by-play of what just happened. "
+            "Use the player's name 'doga'. Reference specific numbers. "
+            "If factory names are available, use them.\n"
+            f"{names_context}\n"
+            f"Changes in the last 10 minutes:\n{diff}"
+        )
+
+        if self.session_started:
+            cmd = [
+                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                "--append-system-prompt", system_prompt,
+                user_message,
+            ]
+        else:
+            cmd = [
+                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
+                "--system-prompt", system_prompt,
+                user_message,
+            ]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+            )
+            response = result.stdout.strip()
+            if response:
+                self.session_started = True
+                ts = datetime.now(timezone.utc).isoformat()
+                self.history.append({"role": "Claude", "text": response, "ts": ts})
+                append_history({"role": "Claude", "text": response, "ts": ts})
+                print(f"<<< [Claude narration]: {response}")
+                self.send_to_game(response)
+        except Exception as exc:
+            print(f"  Narration failed: {exc}")
+
     # -- Main loop ---------------------------------------------------
 
     def run(self):
@@ -1302,7 +1473,7 @@ class Bridge:
 
         print("\nWaiting for messages... (Ctrl-C to quit)\n")
 
-        # snapshot initial game state for check-in diffs
+        # snapshot initial game state for check-in and narration diffs
         self._paused = False
         initial = self._fetch_game_state()
         if initial is not None:
@@ -1310,7 +1481,9 @@ class Bridge:
                 self._cached_state = initial
             print("  Initial game state fetched.")
         self.last_state = initial
+        self._narration_state = initial
         self.last_checkin = time.time()
+        self.last_narration = time.time()
 
         # start background state poller (before focus watcher)
         self._start_state_poller()
@@ -1323,11 +1496,22 @@ class Bridge:
                 for msg in self.poll_messages():
                     self.handle_message(msg)
 
-                # periodic check-in (skip if game is paused)
+                # periodic check-in and narration (skip if game is paused)
                 now = time.time()
-                if now - self.last_checkin >= CHECKIN_INTERVAL:
+                narration_due = now - self.last_narration >= NARRATION_INTERVAL
+                checkin_due = now - self.last_checkin >= CHECKIN_INTERVAL
+
+                if narration_due:
                     if self._paused:
-                        # reset timer so it starts fresh when unpaused
+                        self.last_narration = now
+                        self.last_checkin = now
+                    else:
+                        # Narration REPLACES check-in when they coincide
+                        self.last_narration = now
+                        self.last_checkin = now
+                        self.do_narration()
+                elif checkin_due:
+                    if self._paused:
                         self.last_checkin = now
                     else:
                         self.last_checkin = now
