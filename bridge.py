@@ -15,6 +15,7 @@ Zero external dependencies - uses only Python stdlib + the `claude` CLI.
 
 import base64
 import json
+import math
 import os
 import re
 import socket
@@ -45,6 +46,7 @@ HISTORY_FILE = PERSIST_DIR / "history.jsonl"
 TRANSCRIPT_FILE = PERSIST_DIR / "transcript.txt"
 BLUEPRINT_DIR = PERSIST_DIR / "blueprints"
 FACTORY_NAMES_FILE = PERSIST_DIR / "factory_names.json"
+GOALS_FILE = PERSIST_DIR / "goals.json"
 
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 
@@ -247,6 +249,8 @@ class Bridge:
         self._state_lock = threading.Lock()
         self.factory_names: dict = {}
         self._narration_state: dict | None = None
+        self.goals: list[str] = []
+        self._last_threat_state: dict | None = None
 
     def init(self):
         """Load persistent state."""
@@ -263,12 +267,38 @@ class Bridge:
             except (json.JSONDecodeError, OSError):
                 self.factory_names = {}
 
+        # Load goals if they exist
+        self.goals = self._load_goals()
+        if self.goals:
+            print(f"  Goals       : {len(self.goals)} goals loaded")
+
         n = len(self.history)
         print(f"  History     : {n} messages loaded from prior sessions")
         if self.transcript:
             print(f"  Transcript  : {len(self.transcript)} chars loaded")
         else:
             print(f"  Transcript  : none (place transcript in {TRANSCRIPT_FILE})")
+
+    # -- Goal persistence -------------------------------------------
+
+    def _save_goals(self):
+        """Save the current goals list to disk as JSON."""
+        try:
+            GOALS_FILE.write_text(json.dumps(self.goals, indent=2))
+        except OSError as exc:
+            print(f"  Failed to save goals: {exc}")
+
+    def _load_goals(self) -> list[str]:
+        """Load goals from the JSON file on disk."""
+        if not GOALS_FILE.exists():
+            return []
+        try:
+            data = json.loads(GOALS_FILE.read_text())
+            if isinstance(data, list):
+                return [str(g) for g in data]
+        except (json.JSONDecodeError, OSError):
+            pass
+        return []
 
     # -- RCON helpers -----------------------------------------------
 
@@ -339,6 +369,19 @@ class Bridge:
         "   darkness=math.floor(su.darkness*100)/100,"
         "   peaceful=su.peaceful_mode"
         " }))"
+    )
+
+    # Query: Force modifier bonuses (for ratio calculations)
+    Q_BONUSES = (
+        "/sc local f=game.forces.player; rcon.print(helpers.table_to_json({"
+        "  mining_productivity=f.mining_drill_productivity_bonus,"
+        "  lab_speed=f.laboratory_speed_modifier,"
+        "  lab_productivity=f.laboratory_productivity_bonus,"
+        "  inserter_stack=f.inserter_stack_size_bonus,"
+        "  bulk_inserter_cap=f.bulk_inserter_capacity_bonus,"
+        "  belt_stack=f.belt_stack_size_bonus,"
+        "  worker_robot_speed=f.worker_robots_speed_modifier"
+        "}))"
     )
 
     # Query 2: Item production (lifetime totals for key items)
@@ -604,6 +647,24 @@ class Bridge:
         " rcon.print(helpers.table_to_json(d))"
     )
 
+    # Query: Nearby enemy threats (enemies + nests within 200/400/600 tiles)
+    Q_THREATS = (
+        "/sc local su=game.surfaces[1]; local p=game.connected_players[1];"
+        " if not p then rcon.print('{}') return end;"
+        " local pos=p.position; local d={enemies={},nests={}};"
+        " local ranges={200,400,600};"
+        " for _,r in pairs(ranges) do"
+        "   local units=su.count_entities_filtered{type='unit',force='enemy',position=pos,radius=r};"
+        "   if units>0 then d.enemies[tostring(r)]=units end;"
+        " end;"
+        " local spawners=su.find_entities_filtered{type='unit-spawner',force='enemy',position=pos,radius=600,limit=5};"
+        " for _,s in pairs(spawners) do"
+        "   d.nests[#d.nests+1]={x=math.floor(s.position.x),y=math.floor(s.position.y),"
+        "     name=s.name,dist=math.floor(math.sqrt((s.position.x-pos.x)^2+(s.position.y-pos.y)^2))};"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
     def _rcon_json(self, lua: str) -> dict | None:
         """Run a Lua snippet via RCON and parse the JSON result."""
         try:
@@ -638,6 +699,8 @@ class Bridge:
             state["pollution_sources"] = self._rcon_json(self.Q_POLLUTION) or {}
             state["resources"] = self._rcon_json(self.Q_RESOURCES) or {}
             state["tech_available"] = self._rcon_json(self.Q_TECH_AVAIL) or []
+            state["bonuses"] = self._rcon_json(self.Q_BONUSES) or {}
+            state["threats"] = self._rcon_json(self.Q_THREATS) or {}
             # Keep legacy "production" key for diff_states compatibility
             state["production"] = state["item_totals"]
             return state
@@ -738,6 +801,62 @@ class Bridge:
             print(f"  !!! {msg}")
             self.send_to_game(msg)
 
+    @staticmethod
+    def _direction_from_offset(dx: float, dy: float) -> str:
+        """Return a compass direction (N/NE/E/SE/S/SW/W/NW) from a dx,dy offset.
+
+        Factorio coords: +x = east, +y = south.
+        """
+        angle = math.degrees(math.atan2(dy, dx))  # 0=east, 90=south
+        # Convert to compass: 0=N, 90=E, 180=S, 270=W
+        compass = (angle + 90) % 360  # shift so 0=north
+        directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        idx = int((compass + 22.5) % 360 / 45)
+        return directions[idx]
+
+    def _check_threat_changes(self, new_threats: dict) -> list[str]:
+        """Compare threat state from the 30s poll and generate alerts."""
+        alerts = []
+        old = self._last_threat_state
+        self._last_threat_state = new_threats
+
+        if old is None:
+            return []
+
+        # Check if enemies within 200 tiles increased
+        new_enemies = new_threats.get("enemies", {})
+        old_enemies = old.get("enemies", {})
+
+        new_close = new_enemies.get("200", 0)
+        old_close = old_enemies.get("200", 0)
+        if new_close > 0 and new_close > old_close:
+            # Try to infer direction from nearby nests
+            nests = new_threats.get("nests", [])
+            direction = ""
+            if nests:
+                # Use the closest nest to infer direction
+                closest = min(nests, key=lambda n: n.get("dist", 9999))
+                direction = f" from the {self._direction_from_offset(closest.get('x', 0), closest.get('y', 0))}"
+            alerts.append(
+                f"Biter alert! {new_close} enemies within 200 tiles{direction}!"
+            )
+
+        # Check for new nests within 400 tiles
+        old_nests = {(n.get("x"), n.get("y")) for n in old.get("nests", [])}
+        for nest in new_threats.get("nests", []):
+            pos = (nest.get("x"), nest.get("y"))
+            dist = nest.get("dist", 0)
+            if pos not in old_nests and dist <= 400:
+                dx = nest.get("x", 0)
+                dy = nest.get("y", 0)
+                direction = self._direction_from_offset(dx, dy)
+                alerts.append(
+                    f"Biter nest spotted at ({nest.get('x', '?')},{nest.get('y', '?')}), "
+                    f"distance: {dist} tiles {direction}"
+                )
+
+        return alerts
+
     def _state_poll_loop(self):
         """Background loop: 5s alert checks, 30s full state refresh.
 
@@ -771,6 +890,11 @@ class Bridge:
                         self._cached_state = state
                     game_time = state.get("game_time", "?")
                     print(f"  [state poller] refreshed (game time: {game_time})")
+
+                    # --- Threat detection ---
+                    threat_alerts = self._check_threat_changes(state.get("threats", {}))
+                    if threat_alerts:
+                        self._send_alert(threat_alerts)
 
     def _start_state_poller(self):
         """Start the background game-state polling thread."""
@@ -994,6 +1118,34 @@ class Bridge:
             names = [f"{t['name']} ({t['cost']} packs)" for t in techs]
             lines.append(f"Available to research: {', '.join(names)}")
 
+        # Force modifier bonuses
+        bonuses = state.get("bonuses", {})
+        if bonuses:
+            non_zero = {k: v for k, v in bonuses.items() if v}
+            if non_zero:
+                lines.append("Force bonuses:")
+                for name, val in sorted(non_zero.items()):
+                    lines.append(f"  {name}: +{val}")
+
+        # Nearby threats
+        threats = state.get("threats", {})
+        enemies = threats.get("enemies", {})
+        nests = threats.get("nests", [])
+        if enemies or nests:
+            lines.append("NEARBY THREATS:")
+            for r in ("200", "400", "600"):
+                count = enemies.get(r, 0)
+                if count:
+                    lines.append(f"  Enemies within {r} tiles: {count}")
+            if nests:
+                lines.append("  Nearby nests:")
+                for nest in nests:
+                    lines.append(
+                        f"    {nest.get('name', 'spawner')} at "
+                        f"({nest.get('x', '?')},{nest.get('y', '?')}) "
+                        f"distance: {nest.get('dist', '?')} tiles"
+                    )
+
         return "\n".join(lines)
 
     # -- Blueprint handling -------------------------------------------
@@ -1050,6 +1202,11 @@ class Bridge:
             "Each entity needs 'entity_number', 'name', 'position' (with 'x' and 'y'). "
             "The version field should be 562949954076672 (for Factorio 2.0). "
             "Output the raw blueprint string — the bridge will save it for the player to import.",
+            "When the player asks about ratios, production targets, or 'how many X do I need', "
+            "calculate exact numbers using the game state data. Key formulas: base assembler speeds "
+            "are assembling-machine-1=0.5, assembling-machine-2=0.75, assembling-machine-3=1.25. "
+            "Furnace speed: stone=1, steel=2, electric=2. Account for any productivity/speed bonuses "
+            "shown in the game state. Show your math briefly.",
             "",
         ]
 
@@ -1066,6 +1223,16 @@ class Bridge:
             parts.append("The player's factory areas and infrastructure have been given fun names. USE these names when referring to them:")
             for original, nickname in self.factory_names.items():
                 parts.append(f"  {original} -> {nickname}")
+            parts.append("")
+
+        # Include player goals
+        if self.goals:
+            goal_list = "; ".join(self.goals)
+            parts.append(
+                f"The player's current goals: [{goal_list}]. "
+                "Track progress toward these goals. In check-ins and narrations, "
+                "reference how they're progressing. Celebrate milestones."
+            )
             parts.append("")
 
         # Include live game state
@@ -1156,8 +1323,41 @@ class Bridge:
         ts = datetime.now(timezone.utc).isoformat()
         print(f"\n>>> [{player}]: {text}")
 
-        # Check for factory rename trigger
+        # Check for goal commands (case insensitive)
         text_lower = text.lower().strip()
+        if text_lower.startswith("goal:"):
+            goal_body = text[len("goal:"):].strip()
+            goal_body_lower = goal_body.lower()
+            if goal_body_lower in ("done", "clear"):
+                self.goals.clear()
+                self._save_goals()
+                self.send_to_game("All goals cleared! Set new ones with 'goal: <your goal>'")
+                print(f"  -> Goals cleared")
+                return
+            elif goal_body_lower.startswith("done "):
+                remove_text = goal_body[len("done "):].strip()
+                # Find and remove matching goal (case insensitive)
+                removed = False
+                for i, g in enumerate(self.goals):
+                    if g.lower() == remove_text.lower():
+                        self.goals.pop(i)
+                        self._save_goals()
+                        self.send_to_game(f"Goal completed: '{g}'! {len(self.goals)} goals remaining.")
+                        print(f"  -> Goal removed: {g}")
+                        removed = True
+                        break
+                if not removed:
+                    self.send_to_game(f"No matching goal found for '{remove_text}'. Current goals: {', '.join(self.goals) if self.goals else 'none'}")
+                return
+            else:
+                # Add new goal
+                self.goals.append(goal_body)
+                self._save_goals()
+                self.send_to_game(f"Goal added: '{goal_body}'. Now tracking {len(self.goals)} goal(s).")
+                print(f"  -> Goal added: {goal_body}")
+                return
+
+        # Check for factory rename trigger
         if text_lower in ("rename my factory", "name my stuff"):
             print("  -> Factory naming triggered!")
             self.send_to_game("On it! Naming your factory...")
