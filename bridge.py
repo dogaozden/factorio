@@ -242,7 +242,7 @@ class Bridge:
         self.transcript: str = ""
         self.last_state: dict | None = None
         self.last_checkin: float = 0
-        self._alerted: set[str] = set()  # tracks which alerts have fired (dedup)
+        self._alerted: dict[str, float] = {}  # key -> last fire time
         self.last_narration: float = 0
         self.session_started = False
         self._cached_state: dict | None = None
@@ -769,14 +769,14 @@ class Bridge:
                 and old_c.get("research", "none") != "none"):
             alerts.append(f"Research complete! Nothing queued — pick your next tech")
         elif new_c.get("research", "none") != "none":
-            self._alerted.discard("research")
+            self._alerted.pop("research", None)
 
         # Trains stuck
         new_trains = new_alert.get("trains", {})
         old_trains = old_alert.get("trains", {})
         # Clear train alerts for trains that are no longer stuck
         if new_trains.get("stuck", 0) == 0:
-            self._alerted = {k for k in self._alerted if not k.startswith("train-")}
+            self._alerted = {k: v for k, v in self._alerted.items() if not k.startswith("train-")}
         if new_trains.get("stuck", 0) > old_trains.get("stuck", 0):
             for t in new_trains.get("trains", []):
                 if t.get("state") in ("path_lost", "no_path", "no_schedule"):
@@ -799,14 +799,16 @@ class Bridge:
                 alerts.append(f"Power critical! Using {pct}% of generation capacity")
             elif "power" in self._alerted:
                 # Power recovered — clear so it can fire again if it drops
-                self._alerted.discard("power")
+                self._alerted.pop("power", None)
 
         return alerts
 
+    ALERT_REPEAT_INTERVAL = 180  # re-alert every 3 minutes if still ongoing
+
     def _send_alert(self, alerts: list[str]):
-        """Send critical alerts directly to game chat. Dedup: each alert fires once."""
+        """Send critical alerts. Repeats every 3 min if condition persists."""
+        now = time.time()
         for alert in alerts:
-            # Create a dedup key from the alert category
             if "Power" in alert:
                 key = "power"
             elif "Train" in alert:
@@ -818,9 +820,10 @@ class Bridge:
             else:
                 key = alert
 
-            if key in self._alerted:
+            last = self._alerted.get(key, 0)
+            if now - last < self.ALERT_REPEAT_INTERVAL:
                 continue
-            self._alerted.add(key)
+            self._alerted[key] = now
             msg = f"[ALERT] {alert}"
             print(f"  !!! {msg}")
             self.send_to_game(msg)
