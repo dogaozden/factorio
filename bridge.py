@@ -49,6 +49,7 @@ FACTORY_NAMES_FILE = PERSIST_DIR / "factory_names.json"
 GOALS_FILE = PERSIST_DIR / "goals.json"
 
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
+RECIPE_SCRIPT = str(Path(__file__).parent / "recipe_lookup.py")
 
 POLL_INTERVAL = 0.5          # seconds between file checks
 MAX_RESPONSE_LENGTH = 500    # chars per chat message chunk
@@ -1359,10 +1360,11 @@ class Bridge:
             "Each entity needs 'entity_number', 'name', 'position' (with 'x' and 'y'). "
             "The version field should be 562949954076672 (for Factorio 2.0). "
             "Output the raw blueprint string — the bridge will save it for the player to import.",
-            "CRITICAL: NEVER guess or hallucinate Factorio recipes. When the player asks about "
-            "recipes, ratios, crafting, or how to build something, ONLY use recipe data provided "
-            "under 'VERIFIED GAME DATA' in this prompt. If no verified data is provided for an item, "
-            "say you need to look it up and ask the player to type 'recipe <item-name>'.",
+            "CRITICAL: NEVER guess or hallucinate Factorio recipes. You have Bash access. "
+            "To look up ANY recipe, run: python3 " + RECIPE_SCRIPT + " <item-name> "
+            "(e.g. python3 " + RECIPE_SCRIPT + " locomotive fast-transport-belt substation). "
+            "ALWAYS look up recipes before answering questions about crafting, ratios, or builds. "
+            "You can look up multiple items in one call. Do NOT ask the player to look things up — do it yourself.",
             "When the player asks about ratios, production targets, or 'how many X do I need', "
             "calculate exact numbers using VERIFIED GAME DATA recipes and the game state. "
             "Key formulas: base assembler speeds "
@@ -1406,6 +1408,24 @@ class Bridge:
 
         return "\n".join(parts)
 
+    def _claude_cmd(self, system_prompt: str, extra_flags: list[str] | None = None) -> list[str]:
+        """Build the base claude CLI command with session and tool access."""
+        if self.session_started:
+            cmd = [
+                CLAUDE_BIN, "-p", "-c",
+                "--append-system-prompt", system_prompt,
+                "--allowedTools", "Read,Bash",
+            ]
+        else:
+            cmd = [
+                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
+                "--system-prompt", system_prompt,
+                "--allowedTools", "Read,Bash",
+            ]
+        if extra_flags:
+            cmd.extend(extra_flags)
+        return cmd
+
     def ask_claude(self, message: str, player: str) -> str:
         """Send a message to Claude Code CLI and return the response."""
         system_prompt = self._build_system_prompt()
@@ -1427,19 +1447,7 @@ class Bridge:
                 )
 
         user_message = f"{player}: {message}"
-
-        if self.session_started:
-            cmd = [
-                CLAUDE_BIN, "-p", "-c",
-                "--append-system-prompt", system_prompt,
-                user_message,
-            ]
-        else:
-            cmd = [
-                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
-                "--system-prompt", system_prompt,
-                user_message,
-            ]
+        cmd = self._claude_cmd(system_prompt) + [user_message]
 
         try:
             result = subprocess.run(
@@ -1547,19 +1555,7 @@ class Bridge:
 
         # Call Claude using the same session approach as ask_claude()
         system_prompt = self._build_system_prompt()
-
-        if self.session_started:
-            cmd = [
-                CLAUDE_BIN, "-p", "-c",
-                "--append-system-prompt", system_prompt,
-                "--allowedTools", "Read",
-            ]
-        else:
-            cmd = [
-                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
-                "--system-prompt", system_prompt,
-                "--allowedTools", "Read",
-            ]
+        cmd = self._claude_cmd(system_prompt)
 
         try:
             result = subprocess.run(
@@ -1761,18 +1757,7 @@ class Bridge:
             "If nothing notable changed, just say something brief and encouraging."
         )
 
-        if self.session_started:
-            cmd = [
-                CLAUDE_BIN, "-p", "-c",
-                "--append-system-prompt", system_prompt,
-                user_message,
-            ]
-        else:
-            cmd = [
-                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
-                "--system-prompt", system_prompt,
-                user_message,
-            ]
+        cmd = self._claude_cmd(system_prompt) + [user_message]
 
         try:
             result = subprocess.run(
@@ -1907,18 +1892,7 @@ class Bridge:
             f"Changes in the last 10 minutes:\n{diff}"
         )
 
-        if self.session_started:
-            cmd = [
-                CLAUDE_BIN, "-p", "-c",
-                "--append-system-prompt", system_prompt,
-                user_message,
-            ]
-        else:
-            cmd = [
-                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
-                "--system-prompt", system_prompt,
-                user_message,
-            ]
+        cmd = self._claude_cmd(system_prompt) + [user_message]
 
         try:
             result = subprocess.run(
