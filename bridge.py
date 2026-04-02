@@ -1447,11 +1447,12 @@ class Bridge:
                 )
 
         user_message = f"{player}: {message}"
-        cmd = self._claude_cmd(system_prompt) + [user_message]
+        cmd = self._claude_cmd(system_prompt)
 
         try:
             result = subprocess.run(
                 cmd,
+                input=user_message,
                 capture_output=True,
                 text=True,
                 timeout=CLAUDE_TIMEOUT,
@@ -1757,11 +1758,12 @@ class Bridge:
             "If nothing notable changed, just say something brief and encouraging."
         )
 
-        cmd = self._claude_cmd(system_prompt) + [user_message]
+        cmd = self._claude_cmd(system_prompt)
 
         try:
             result = subprocess.run(
                 cmd,
+                input=user_message,
                 capture_output=True,
                 text=True,
                 timeout=CLAUDE_TIMEOUT,
@@ -1892,11 +1894,11 @@ class Bridge:
             f"Changes in the last 10 minutes:\n{diff}"
         )
 
-        cmd = self._claude_cmd(system_prompt) + [user_message]
+        cmd = self._claude_cmd(system_prompt)
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+                cmd, input=user_message, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
             )
             response = result.stdout.strip()
             if response:
