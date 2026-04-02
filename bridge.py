@@ -418,72 +418,145 @@ class Bridge:
         " rcon.print(helpers.table_to_json(d))"
     )
 
-    # Query 8: Machine problems (idle, starved, output full)
+    # Query 8: Machine problems with coordinates, clustered by area
+    # Clusters entities within 20-tile grid cells
     Q_MACHINES = (
         "/sc local su=game.surfaces[1]; local f=game.forces.player;"
-        " local d={starved={},full={},no_power={},disabled={}};"
+        " local function G(x,y) return math.floor(x/20)*20 ..','.. math.floor(y/20)*20 end;"
+        " local d={starved={},full={},no_power={},no_recipe={}};"
+        " local ds=defines.entity_status;"
         " local types={'assembling-machine','furnace','oil-refinery','chemical-plant'};"
         " for _,t in pairs(types) do"
-        "   local ents=su.find_entities_filtered{type=t,force=f};"
-        "   for _,e in pairs(ents) do"
+        "   for _,e in pairs(su.find_entities_filtered{type=t,force=f}) do"
         "     local s=e.status; local n=e.name; local r='';"
         "     if e.get_recipe() then r=e.get_recipe().name end;"
-        "     local key=n..'|'..r;"
-        "     if s==defines.entity_status.item_ingredient_shortage"
-        "       or s==defines.entity_status.fluid_ingredient_shortage"
-        "       or s==defines.entity_status.no_ingredients then"
+        "     local g=G(e.position.x,e.position.y);"
+        "     local key=n..'|'..r..'@'..g;"
+        "     if r=='' and s~=ds.working and s~=ds.normal then"
+        "       d.no_recipe[key]=(d.no_recipe[key] or 0)+1"
+        "     elseif s==ds.item_ingredient_shortage"
+        "       or s==ds.fluid_ingredient_shortage"
+        "       or s==ds.no_ingredients then"
         "       d.starved[key]=(d.starved[key] or 0)+1"
-        "     elseif s==defines.entity_status.full_output"
-        "       or s==defines.entity_status.waiting_for_space_in_destination then"
+        "     elseif s==ds.full_output"
+        "       or s==ds.waiting_for_space_in_destination then"
         "       d.full[key]=(d.full[key] or 0)+1"
-        "     elseif s==defines.entity_status.no_power"
-        "       or s==defines.entity_status.low_power then"
+        "     elseif s==ds.no_power or s==ds.low_power then"
         "       d.no_power[key]=(d.no_power[key] or 0)+1"
-        "     elseif s==defines.entity_status.disabled then"
-        "       d.disabled[key]=(d.disabled[key] or 0)+1"
         "     end"
         "   end"
         " end;"
         " rcon.print(helpers.table_to_json(d))"
     )
 
-    # Query 9: Turret ammo levels + damaged walls
+    # Query 9: Turret ammo + damaged walls with coordinates
     Q_DEFENSES = (
         "/sc local su=game.surfaces[1]; local f=game.forces.player;"
-        " local d={low_ammo_turrets=0,empty_turrets=0,damaged_walls=0,total_turrets=0,total_walls=0};"
-        " local turrets=su.find_entities_filtered{type='ammo-turret',force=f};"
-        " d.total_turrets=#turrets;"
-        " for _,t in pairs(turrets) do"
-        "   local inv=t.get_inventory(defines.inventory.turret_ammo);"
+        " local function G(x,y) return math.floor(x/20)*20 ..','.. math.floor(y/20)*20 end;"
+        " local d={empty={},low={},damaged={},tt=0,tw=0};"
+        " for _,t in pairs(su.find_entities_filtered{type='ammo-turret',force=f}) do"
+        "   d.tt=d.tt+1; local inv=t.get_inventory(defines.inventory.turret_ammo);"
         "   if inv then local c=0;"
         "     for i=1,#inv do if inv[i].valid_for_read then c=c+inv[i].count end end;"
-        "     if c==0 then d.empty_turrets=d.empty_turrets+1"
-        "     elseif c<10 then d.low_ammo_turrets=d.low_ammo_turrets+1 end"
+        "     local g=G(t.position.x,t.position.y);"
+        "     if c==0 then d.empty[g]=(d.empty[g] or 0)+1"
+        "     elseif c<10 then d.low[g]=(d.low[g] or 0)+1 end"
         "   end"
         " end;"
-        " local walls=su.find_entities_filtered{type='wall',force=f};"
-        " d.total_walls=#walls;"
-        " for _,w in pairs(walls) do"
-        "   if w.health<w.get_health_ratio()*100 then end;"
-        "   if w.get_health_ratio()<1 then d.damaged_walls=d.damaged_walls+1 end"
+        " for _,w in pairs(su.find_entities_filtered{type='wall',force=f}) do"
+        "   d.tw=d.tw+1;"
+        "   if w.get_health_ratio()<1 then"
+        "     local g=G(w.position.x,w.position.y);"
+        "     d.damaged[g]=(d.damaged[g] or 0)+1"
+        "   end"
         " end;"
         " rcon.print(helpers.table_to_json(d))"
     )
 
-    # Query 10: Train status
+    # Query 10: Train status with positions and schedule info
     Q_TRAINS = (
         "/sc local f=game.forces.player;"
         " local d={trains={},stuck=0};"
-        " local states={[0]='on_the_path',[1]='path_lost',[2]='no_schedule',"
+        " local S={[0]='on_the_path',[1]='path_lost',[2]='no_schedule',"
         "   [3]='no_path',[4]='arrive_signal',[5]='wait_signal',"
         "   [6]='arrive_station',[7]='wait_station',[8]='manual_control_stop',"
         "   [9]='manual_control'};"
         " for _,t in pairs(game.train_manager.get_trains{force=f}) do"
-        "   do"
-        "     local s=states[t.state] or 'unknown';"
-        "     d.trains[#d.trains+1]={id=t.id,state=s};"
-        "     if s=='path_lost' or s=='no_path' or s=='no_schedule' then"
-        "       d.stuck=d.stuck+1 end"
+        "   local s=S[t.state] or 'unknown';"
+        "   local loco=t.locomotives.front_movers[1] or t.locomotives.back_movers[1];"
+        "   local x,y=0,0; if loco then x=math.floor(loco.position.x);"
+        "     y=math.floor(loco.position.y) end;"
+        "   local sched={}; if t.schedule then"
+        "     for _,r in pairs(t.schedule.records or {}) do"
+        "       sched[#sched+1]=r.station or '?' end end;"
+        "   d.trains[#d.trains+1]={id=t.id,state=s,x=x,y=y,stops=sched};"
+        "   if s=='path_lost' or s=='no_path' or s=='no_schedule' then"
+        "     d.stuck=d.stuck+1 end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
+    # Query 11: Player inventory (main items)
+    Q_INVENTORY = (
+        "/sc local d={};"
+        " for _,p in pairs(game.connected_players) do"
+        "   local inv=p.get_main_inventory();"
+        "   if inv then local items={};"
+        "     for i=1,#inv do if inv[i].valid_for_read then"
+        "       local n=inv[i].name; items[n]=(items[n] or 0)+inv[i].count"
+        "     end end;"
+        "     d[p.name]=items"
+        "   end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
+    # Query 12: Logistic network stats (if roboports exist)
+    Q_LOGISTICS = (
+        "/sc local f=game.forces.player; local su=game.surfaces[1];"
+        " local nets=f.logistic_networks[su.name];"
+        " if not nets or #nets==0 then rcon.print('{}') return end;"
+        " local d={networks={}};"
+        " for i,n in pairs(nets) do"
+        "   d.networks[#d.networks+1]={"
+        "     bots_total=n.all_logistic_robots,"
+        "     bots_available=n.available_logistic_robots,"
+        "     con_total=n.all_construction_robots,"
+        "     con_available=n.available_construction_robots,"
+        "     robot_limit=n.robot_limit}"
+        "   if #d.networks>=3 then break end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
+    # Query 13: Pollution sources (top polluters by entity type)
+    Q_POLLUTION = (
+        "/sc local su=game.surfaces[1];"
+        " local ps=su.pollution_statistics;"
+        " local p=defines.flow_precision_index.ten_minutes;"
+        " local d={};"
+        " for n,_ in pairs(ps.input_counts) do"
+        "   local v=ps.get_flow_count{name=n,category='input',precision_index=p};"
+        "   if v>0.1 then d[n]=math.floor(v*10)/10 end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
+    # Query 14: Resources remaining on surface
+    Q_RESOURCES = (
+        "/sc local su=game.surfaces[1];"
+        " rcon.print(helpers.table_to_json(su.get_resource_counts()))"
+    )
+
+    # Query 15: Available but unresearched technologies (next candidates)
+    Q_TECH_AVAIL = (
+        "/sc local f=game.forces.player; local d={};"
+        " for _,t in pairs(f.technologies) do"
+        "   if not t.researched and t.enabled then"
+        "     local ok=true; for _,p in pairs(t.prerequisites) do"
+        "       if not p.researched then ok=false; break end end;"
+        "     if ok then d[#d+1]={name=t.name,"
+        "       cost=math.floor(t.research_unit_count)} end"
         "   end"
         " end;"
         " rcon.print(helpers.table_to_json(d))"
@@ -518,6 +591,11 @@ class Bridge:
             state["machines"] = self._rcon_json(self.Q_MACHINES) or {}
             state["defenses"] = self._rcon_json(self.Q_DEFENSES) or {}
             state["trains"] = self._rcon_json(self.Q_TRAINS) or {}
+            state["inventory"] = self._rcon_json(self.Q_INVENTORY) or {}
+            state["logistics"] = self._rcon_json(self.Q_LOGISTICS) or {}
+            state["pollution_sources"] = self._rcon_json(self.Q_POLLUTION) or {}
+            state["resources"] = self._rcon_json(self.Q_RESOURCES) or {}
+            state["tech_available"] = self._rcon_json(self.Q_TECH_AVAIL) or []
             # Keep legacy "production" key for diff_states compatibility
             state["production"] = state["item_totals"]
             return state
@@ -635,55 +713,57 @@ class Bridge:
                     f"Player: {p.get('name','?')} at ({p.get('x','?')}, {p.get('y','?')})"
                 )
 
-        # Machine problems
+        # Machine problems with locations
         machines = state.get("machines", {})
         starved = machines.get("starved", {})
         full = machines.get("full", {})
         no_power = machines.get("no_power", {})
-        disabled = machines.get("disabled", {})
-        if starved or full or no_power:
+        no_recipe = machines.get("no_recipe", {})
+        if starved or full or no_power or no_recipe:
             lines.append("MACHINE PROBLEMS:")
-            if starved:
-                lines.append("  Starved (missing ingredients):")
-                for key, count in sorted(starved.items()):
-                    parts = key.split("|")
-                    machine = parts[0]
-                    recipe = parts[1] if len(parts) > 1 and parts[1] else "no recipe"
-                    lines.append(f"    {count}x {machine} ({recipe})")
-            if full:
-                lines.append("  Output full (backed up):")
-                for key, count in sorted(full.items()):
-                    parts = key.split("|")
-                    machine = parts[0]
-                    recipe = parts[1] if len(parts) > 1 and parts[1] else "no recipe"
-                    lines.append(f"    {count}x {machine} ({recipe})")
-            if no_power:
-                lines.append("  No/low power:")
-                for key, count in sorted(no_power.items()):
-                    parts = key.split("|")
-                    machine = parts[0]
-                    recipe = parts[1] if len(parts) > 1 and parts[1] else "?"
-                    lines.append(f"    {count}x {machine} ({recipe})")
+            for label, data in [
+                ("Starved (missing ingredients)", starved),
+                ("Output full (backed up)", full),
+                ("No/low power", no_power),
+                ("No recipe set", no_recipe),
+            ]:
+                if not data:
+                    continue
+                lines.append(f"  {label}:")
+                for key, count in sorted(data.items()):
+                    # key format: "machine|recipe@x,y"
+                    at_split = key.split("@")
+                    machine_recipe = at_split[0]
+                    coord = at_split[1] if len(at_split) > 1 else "?"
+                    mr_parts = machine_recipe.split("|")
+                    machine = mr_parts[0]
+                    recipe = mr_parts[1] if len(mr_parts) > 1 and mr_parts[1] else ""
+                    desc = f"{machine} ({recipe})" if recipe else machine
+                    lines.append(f"    {count}x {desc} near ({coord})")
 
-        # Defense alerts
+        # Defense alerts with locations
         defenses = state.get("defenses", {})
-        total_turrets = defenses.get("total_turrets", 0)
-        empty = defenses.get("empty_turrets", 0)
-        low = defenses.get("low_ammo_turrets", 0)
-        damaged = defenses.get("damaged_walls", 0)
-        total_walls = defenses.get("total_walls", 0)
-        if empty or low or damaged:
+        total_turrets = defenses.get("tt", 0)
+        total_walls = defenses.get("tw", 0)
+        empty_turrets = defenses.get("empty", {})
+        low_turrets = defenses.get("low", {})
+        damaged_walls = defenses.get("damaged", {})
+        if empty_turrets or low_turrets or damaged_walls:
             lines.append("DEFENSE ALERTS:")
-            if empty:
-                lines.append(f"  EMPTY turrets (no ammo!): {empty}/{total_turrets}")
-            if low:
-                lines.append(f"  Low ammo turrets (<10 rounds): {low}/{total_turrets}")
-            if damaged:
-                lines.append(f"  Damaged walls: {damaged}/{total_walls}")
+            if empty_turrets:
+                for coord, count in sorted(empty_turrets.items()):
+                    lines.append(f"  {count} EMPTY turrets (no ammo!) near ({coord})")
+            if low_turrets:
+                for coord, count in sorted(low_turrets.items()):
+                    lines.append(f"  {count} low-ammo turrets (<10 rounds) near ({coord})")
+            if damaged_walls:
+                for coord, count in sorted(damaged_walls.items()):
+                    lines.append(f"  {count} damaged walls near ({coord})")
+            lines.append(f"  Total: {total_turrets} turrets, {total_walls} walls")
         elif total_turrets:
             lines.append(f"Defenses OK: {total_turrets} turrets, {total_walls} walls")
 
-        # Train status
+        # Train status with positions and routes
         trains_data = state.get("trains", {})
         trains = trains_data.get("trains", [])
         stuck = trains_data.get("stuck", 0)
@@ -692,8 +772,52 @@ class Bridge:
                          (f", {stuck} STUCK!" if stuck else ""))
             for t in trains:
                 s = t.get("state", "?")
+                x = t.get("x", "?")
+                y = t.get("y", "?")
+                stops = t.get("stops", [])
+                route = " -> ".join(stops) if stops else "no schedule"
                 flag = " *** PROBLEM ***" if s in ("path_lost", "no_path", "no_schedule") else ""
-                lines.append(f"  Train #{t.get('id','?')}: {s}{flag}")
+                lines.append(f"  Train #{t.get('id','?')}: {s} at ({x},{y}) route: {route}{flag}")
+
+        # Player inventory
+        inventory = state.get("inventory", {})
+        for pname, items in inventory.items():
+            if items:
+                inv_parts = [f"{n}: {c}" for n, c in sorted(items.items()) if c > 0]
+                lines.append(f"Player {pname} inventory: {', '.join(inv_parts)}")
+
+        # Logistic networks
+        logistics = state.get("logistics", {})
+        networks = logistics.get("networks", [])
+        if networks:
+            lines.append("Logistic networks:")
+            for i, net in enumerate(networks):
+                lines.append(
+                    f"  Network {i+1}: {net.get('bots_available',0)}/{net.get('bots_total',0)} "
+                    f"logistic bots free, {net.get('con_available',0)}/{net.get('con_total',0)} "
+                    f"construction bots free (limit: {net.get('robot_limit',0)})"
+                )
+
+        # Pollution sources
+        pol_sources = state.get("pollution_sources", {})
+        if pol_sources:
+            lines.append("Pollution sources (per minute):")
+            for name, rate in sorted(pol_sources.items(), key=lambda x: -x[1]):
+                lines.append(f"  {name}: {rate}/min")
+
+        # Resource patches remaining
+        resources = state.get("resources", {})
+        if resources:
+            lines.append("Resources remaining on map:")
+            for name, count in sorted(resources.items()):
+                lines.append(f"  {name}: {count:,}")
+
+        # Available technologies to research
+        tech_avail = state.get("tech_available", [])
+        if isinstance(tech_avail, list) and tech_avail:
+            techs = sorted(tech_avail, key=lambda t: t.get("cost", 0))[:15]
+            names = [f"{t['name']} ({t['cost']} packs)" for t in techs]
+            lines.append(f"Available to research: {', '.join(names)}")
 
         return "\n".join(lines)
 
