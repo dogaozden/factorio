@@ -1,0 +1,9 @@
+{
+  "name": "claude-chat",
+  "version": "1.0.0",
+  "title": "Claude Chat Bridge",
+  "author": "Claude Code",
+  "factorio_version": "2.0",
+  "dependencies": ["base >= 2.0"],
+  "description": "Chat with Claude AI through Factorio's in-game chat. Type !message or use /claude message."
+}
