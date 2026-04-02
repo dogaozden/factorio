@@ -61,6 +61,25 @@ commands.add_command("claude", "Send a message to Claude AI", function(cmd)
 end)
 
 -- ============================================================
+-- Command: /ss  (take a screenshot for Claude to analyze)
+-- ============================================================
+commands.add_command("ss", "Take a screenshot for Claude to analyze", function(cmd)
+    local player_name = "Server"
+    if cmd.player_index then
+        local player = game.get_player(cmd.player_index)
+        if player then
+            player_name = player.name
+            player.print({"", "[color=0,191,255][Claude][/color] ", "Taking screenshot..."})
+        end
+    end
+    local msg = "/ss"
+    if cmd.parameter and cmd.parameter ~= "" then
+        msg = "/ss " .. cmd.parameter
+    end
+    write_message(player_name, msg)
+end)
+
+-- ============================================================
 -- Command: /claude-respond <text>  (called by bridge via RCON)
 -- ============================================================
 commands.add_command("claude-respond", nil, function(cmd)

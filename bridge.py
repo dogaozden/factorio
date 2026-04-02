@@ -1312,6 +1312,106 @@ class Bridge:
 
         return messages
 
+    # -- Screenshot analysis -------------------------------------------
+
+    def _handle_screenshot(self, player: str, question: str):
+        """Take a screenshot via RCON and send it to Claude for analysis."""
+        # Send "Thinking..." first since screenshot analysis takes a moment
+        self.send_to_game("Taking screenshot for analysis...")
+
+        # Send RCON command to take a screenshot
+        screenshot_cmd = (
+            '/sc game.take_screenshot{player=game.get_player(1),'
+            ' resolution={1920,1080},'
+            ' path="claude_screenshot.png",'
+            ' show_gui=false,'
+            ' show_entity_info=true}'
+        )
+        try:
+            self.rcon.send_command(screenshot_cmd)
+        except Exception as exc:
+            print(f"  Screenshot RCON command failed: {exc}")
+            self.send_to_game("Failed to take screenshot.")
+            return
+
+        # Wait for the file to write
+        time.sleep(1)
+
+        # Build the screenshot path
+        screenshot_path = SCRIPT_OUTPUT / "claude_screenshot.png"
+
+        if not screenshot_path.exists():
+            print(f"  Screenshot file not found at {screenshot_path}")
+            self.send_to_game("Screenshot file not found. The game may need more time to save it.")
+            return
+
+        print(f"  Screenshot saved at {screenshot_path}")
+
+        # Build the user message
+        if question:
+            user_message = (
+                f"Read and analyze the Factorio screenshot at {screenshot_path}. {question}"
+            )
+        else:
+            user_message = (
+                f"Read and analyze the Factorio screenshot at {screenshot_path}. "
+                f"What do you notice? Any issues or suggestions?"
+            )
+
+        ts = datetime.now(timezone.utc).isoformat()
+
+        # Save player message to persistent history
+        player_text = f"/ss {question}" if question else "/ss"
+        player_entry = {"role": player, "text": player_text, "ts": ts}
+        self.history.append(player_entry)
+        append_history(player_entry)
+
+        # Call Claude using the same session approach as ask_claude()
+        system_prompt = self._build_system_prompt()
+
+        if self.session_started:
+            cmd = [
+                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                "--append-system-prompt", system_prompt,
+                user_message,
+            ]
+        else:
+            cmd = [
+                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
+                "--system-prompt", system_prompt,
+                user_message,
+            ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_TIMEOUT,
+            )
+            response = result.stdout.strip()
+            if not response and result.returncode != 0:
+                stderr = result.stderr.strip()[:200]
+                response = f"(Claude error: {stderr or 'empty response'})"
+            else:
+                self.session_started = True
+                response = response or "(empty response)"
+                response = self._handle_blueprint_response(response)
+        except subprocess.TimeoutExpired:
+            response = "Sorry, screenshot analysis took too long! Try again."
+        except FileNotFoundError:
+            response = f"Error: claude CLI not found at {CLAUDE_BIN}"
+        except Exception as exc:
+            response = f"Error: {str(exc)[:200]}"
+
+        # Save Claude response to persistent history
+        claude_entry = {"role": "Claude", "text": response, "ts": ts}
+        self.history.append(claude_entry)
+        append_history(claude_entry)
+
+        print(f"<<< [Claude screenshot]: {response}")
+        self.send_to_game(response)
+
     # -- Processing --------------------------------------------------
 
     def handle_message(self, msg: dict):
@@ -1322,6 +1422,13 @@ class Bridge:
 
         ts = datetime.now(timezone.utc).isoformat()
         print(f"\n>>> [{player}]: {text}")
+
+        # Check for screenshot trigger: /ss [optional question]
+        if text.lower().startswith("/ss"):
+            question = text[3:].strip()
+            print(f"  -> Screenshot analysis triggered! Question: {question or '(none)'}")
+            self._handle_screenshot(player, question)
+            return
 
         # Check for goal commands (case insensitive)
         text_lower = text.lower().strip()
