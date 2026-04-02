@@ -488,6 +488,7 @@ class Bridge:
     )
 
     # Query 7: Electric network stats (find a pole and read its network)
+    # Also calculates max generation capacity from entity counts (O(1))
     Q_ELECTRIC = (
         "/sc local su=game.surfaces[1]; local f=game.forces.player;"
         " local poles=su.find_entities_filtered{type='electric-pole',force=f,limit=1};"
@@ -501,6 +502,10 @@ class Bridge:
         " for n,_ in pairs(s.output_counts) do"
         "   local v=s.get_flow_count{name=n,category='output',precision_index=p};"
         "   if v>0 then d.consumption[n]=math.floor(v*1000)/1000 end end;"
+        " local cap=f.get_entity_count('steam-engine')*900"
+        "   +f.get_entity_count('steam-turbine')*5820"
+        "   +f.get_entity_count('solar-panel')*60*su.solar_power_multiplier*(1-su.darkness);"
+        " d.max_capacity_kw=math.floor(cap);"
         " rcon.print(helpers.table_to_json(d))"
     )
 
@@ -715,7 +720,10 @@ class Bridge:
         " local d={turrets=f.get_entity_count('gun-turret')"
         "   +f.get_entity_count('laser-turret'),"
         "   walls=f.get_entity_count('stone-wall')+f.get_entity_count('gate'),"
-        "   research=f.current_research and f.current_research.name or 'none'};"
+        "   research=f.current_research and f.current_research.name or 'none',"
+        "   max_power_kw=f.get_entity_count('steam-engine')*900"
+        "     +f.get_entity_count('steam-turbine')*5820"
+        "     +f.get_entity_count('solar-panel')*60};"
         " rcon.print(helpers.table_to_json(d))"
     )
 
@@ -787,16 +795,16 @@ class Bridge:
                         f"route: {stops}"
                     )
 
-        # Power brownout
+        # Power brownout — compare consumption against max generation capacity
         new_elec = new_alert.get("electric", {})
+        max_cap = new_c.get("max_power_kw", 0)
         econs = new_elec.get("consumption", {})
         eprod = new_elec.get("production", {})
-        if econs and eprod:
-            gen = sum(econs.values())
-            use = sum(eprod.values())
-            if gen > 0 and use / gen > 0.95:
-                pct = round(use / gen * 100)
-                alerts.append(f"Power critical! Using {pct}% of generation capacity")
+        if max_cap > 0 and eprod:
+            use_kw = sum(eprod.values()) * 60 / 1000  # convert flow to kW
+            if use_kw > 0.95 * max_cap:
+                pct = round(use_kw / max_cap * 100)
+                alerts.append(f"Power critical! Using {pct}% of max capacity ({round(use_kw)} kW / {max_cap} kW)")
             elif "power" in self._alerted:
                 # Power recovered — clear so it can fire again if it drops
                 self._alerted.pop("power", None)
@@ -1006,22 +1014,32 @@ class Bridge:
         elec = state.get("electric", {})
         eprod = elec.get("production", {})
         econs = elec.get("consumption", {})
-        if eprod or econs:
+        max_cap_kw = elec.get("max_capacity_kw", 0)
+        if eprod or econs or max_cap_kw:
             lines.append("Electric network:")
+            if max_cap_kw:
+                if max_cap_kw >= 1000:
+                    lines.append(f"  Max generation capacity: {round(max_cap_kw / 1000, 1)} MW")
+                else:
+                    lines.append(f"  Max generation capacity: {max_cap_kw} kW")
             if econs:
                 total_gen = sum(econs.values())
                 kw = round(total_gen * 60 / 1000, 1)
-                lines.append(f"  Total generation: {kw} kW")
+                lines.append(f"  Current production: {kw} kW")
                 for name, v in sorted(econs.items()):
                     kw = round(v * 60 / 1000, 1)
                     lines.append(f"    {name}: {kw} kW")
             if eprod:
                 total_use = sum(eprod.values())
                 kw = round(total_use * 60 / 1000, 1)
-                lines.append(f"  Total consumption: {kw} kW")
+                lines.append(f"  Current consumption: {kw} kW")
                 for name, v in sorted(eprod.items()):
                     kw = round(v * 60 / 1000, 1)
                     lines.append(f"    {name}: {kw} kW")
+            if max_cap_kw and eprod:
+                total_use_kw = round(sum(eprod.values()) * 60 / 1000, 1)
+                pct = round(total_use_kw / max_cap_kw * 100, 1) if max_cap_kw > 0 else 0
+                lines.append(f"  Utilization: {pct}% of capacity")
 
         # Entity counts
         world = state.get("world", {})
