@@ -1418,12 +1418,14 @@ class Bridge:
             cmd = [
                 CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
+                "--allowedTools", "Read",
                 user_message,
             ]
         else:
             cmd = [
                 CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
                 "--system-prompt", system_prompt,
+                "--allowedTools", "Read",
                 user_message,
             ]
 
