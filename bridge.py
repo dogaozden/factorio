@@ -418,6 +418,77 @@ class Bridge:
         " rcon.print(helpers.table_to_json(d))"
     )
 
+    # Query 8: Machine problems (idle, starved, output full)
+    Q_MACHINES = (
+        "/sc local su=game.surfaces[1]; local f=game.forces.player;"
+        " local d={starved={},full={},no_power={},disabled={}};"
+        " local types={'assembling-machine','furnace','oil-refinery','chemical-plant'};"
+        " for _,t in pairs(types) do"
+        "   local ents=su.find_entities_filtered{type=t,force=f};"
+        "   for _,e in pairs(ents) do"
+        "     local s=e.status; local n=e.name; local r='';"
+        "     if e.get_recipe() then r=e.get_recipe().name end;"
+        "     local key=n..'|'..r;"
+        "     if s==defines.entity_status.item_ingredient_shortage"
+        "       or s==defines.entity_status.fluid_ingredient_shortage"
+        "       or s==defines.entity_status.no_ingredients then"
+        "       d.starved[key]=(d.starved[key] or 0)+1"
+        "     elseif s==defines.entity_status.full_output"
+        "       or s==defines.entity_status.waiting_for_space_in_destination then"
+        "       d.full[key]=(d.full[key] or 0)+1"
+        "     elseif s==defines.entity_status.no_power"
+        "       or s==defines.entity_status.low_power then"
+        "       d.no_power[key]=(d.no_power[key] or 0)+1"
+        "     elseif s==defines.entity_status.disabled then"
+        "       d.disabled[key]=(d.disabled[key] or 0)+1"
+        "     end"
+        "   end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
+    # Query 9: Turret ammo levels + damaged walls
+    Q_DEFENSES = (
+        "/sc local su=game.surfaces[1]; local f=game.forces.player;"
+        " local d={low_ammo_turrets=0,empty_turrets=0,damaged_walls=0,total_turrets=0,total_walls=0};"
+        " local turrets=su.find_entities_filtered{type='ammo-turret',force=f};"
+        " d.total_turrets=#turrets;"
+        " for _,t in pairs(turrets) do"
+        "   local inv=t.get_inventory(defines.inventory.turret_ammo);"
+        "   if inv then local c=0;"
+        "     for i=1,#inv do if inv[i].valid_for_read then c=c+inv[i].count end end;"
+        "     if c==0 then d.empty_turrets=d.empty_turrets+1"
+        "     elseif c<10 then d.low_ammo_turrets=d.low_ammo_turrets+1 end"
+        "   end"
+        " end;"
+        " local walls=su.find_entities_filtered{type='wall',force=f};"
+        " d.total_walls=#walls;"
+        " for _,w in pairs(walls) do"
+        "   if w.health<w.get_health_ratio()*100 then end;"
+        "   if w.get_health_ratio()<1 then d.damaged_walls=d.damaged_walls+1 end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
+    # Query 10: Train status
+    Q_TRAINS = (
+        "/sc local f=game.forces.player;"
+        " local d={trains={},stuck=0};"
+        " local states={[0]='on_the_path',[1]='path_lost',[2]='no_schedule',"
+        "   [3]='no_path',[4]='arrive_signal',[5]='wait_signal',"
+        "   [6]='arrive_station',[7]='wait_station',[8]='manual_control_stop',"
+        "   [9]='manual_control'};"
+        " for _,t in pairs(game.train_manager.get_trains{force=f}) do"
+        "   do"
+        "     local s=states[t.state] or 'unknown';"
+        "     d.trains[#d.trains+1]={id=t.id,state=s};"
+        "     if s=='path_lost' or s=='no_path' or s=='no_schedule' then"
+        "       d.stuck=d.stuck+1 end"
+        "   end"
+        " end;"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
     def _rcon_json(self, lua: str) -> dict | None:
         """Run a Lua snippet via RCON and parse the JSON result."""
         try:
@@ -444,6 +515,9 @@ class Bridge:
             state["combat"] = self._rcon_json(self.Q_COMBAT) or {}
             state["world"] = self._rcon_json(self.Q_PLAYER) or {}
             state["electric"] = self._rcon_json(self.Q_ELECTRIC) or {}
+            state["machines"] = self._rcon_json(self.Q_MACHINES) or {}
+            state["defenses"] = self._rcon_json(self.Q_DEFENSES) or {}
+            state["trains"] = self._rcon_json(self.Q_TRAINS) or {}
             # Keep legacy "production" key for diff_states compatibility
             state["production"] = state["item_totals"]
             return state
@@ -560,6 +634,66 @@ class Bridge:
                 lines.append(
                     f"Player: {p.get('name','?')} at ({p.get('x','?')}, {p.get('y','?')})"
                 )
+
+        # Machine problems
+        machines = state.get("machines", {})
+        starved = machines.get("starved", {})
+        full = machines.get("full", {})
+        no_power = machines.get("no_power", {})
+        disabled = machines.get("disabled", {})
+        if starved or full or no_power:
+            lines.append("MACHINE PROBLEMS:")
+            if starved:
+                lines.append("  Starved (missing ingredients):")
+                for key, count in sorted(starved.items()):
+                    parts = key.split("|")
+                    machine = parts[0]
+                    recipe = parts[1] if len(parts) > 1 and parts[1] else "no recipe"
+                    lines.append(f"    {count}x {machine} ({recipe})")
+            if full:
+                lines.append("  Output full (backed up):")
+                for key, count in sorted(full.items()):
+                    parts = key.split("|")
+                    machine = parts[0]
+                    recipe = parts[1] if len(parts) > 1 and parts[1] else "no recipe"
+                    lines.append(f"    {count}x {machine} ({recipe})")
+            if no_power:
+                lines.append("  No/low power:")
+                for key, count in sorted(no_power.items()):
+                    parts = key.split("|")
+                    machine = parts[0]
+                    recipe = parts[1] if len(parts) > 1 and parts[1] else "?"
+                    lines.append(f"    {count}x {machine} ({recipe})")
+
+        # Defense alerts
+        defenses = state.get("defenses", {})
+        total_turrets = defenses.get("total_turrets", 0)
+        empty = defenses.get("empty_turrets", 0)
+        low = defenses.get("low_ammo_turrets", 0)
+        damaged = defenses.get("damaged_walls", 0)
+        total_walls = defenses.get("total_walls", 0)
+        if empty or low or damaged:
+            lines.append("DEFENSE ALERTS:")
+            if empty:
+                lines.append(f"  EMPTY turrets (no ammo!): {empty}/{total_turrets}")
+            if low:
+                lines.append(f"  Low ammo turrets (<10 rounds): {low}/{total_turrets}")
+            if damaged:
+                lines.append(f"  Damaged walls: {damaged}/{total_walls}")
+        elif total_turrets:
+            lines.append(f"Defenses OK: {total_turrets} turrets, {total_walls} walls")
+
+        # Train status
+        trains_data = state.get("trains", {})
+        trains = trains_data.get("trains", [])
+        stuck = trains_data.get("stuck", 0)
+        if trains:
+            lines.append(f"Trains: {len(trains)} total" +
+                         (f", {stuck} STUCK!" if stuck else ""))
+            for t in trains:
+                s = t.get("state", "?")
+                flag = " *** PROBLEM ***" if s in ("path_lost", "no_path", "no_schedule") else ""
+                lines.append(f"  Train #{t.get('id','?')}: {s}{flag}")
 
         return "\n".join(lines)
 
