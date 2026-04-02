@@ -1316,6 +1316,12 @@ class Bridge:
         re.compile(r"how\s+many\s+\S+\s+(?:to|for)\s+(?:make|craft|build)\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
         re.compile(r"what(?:'s| is)\s+(?:the\s+)?recipe\s+(?:for\s+)?(.+)", re.IGNORECASE),
         re.compile(r"what\s+goes\s+into\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        # Ratio and optimization questions
+        re.compile(r"(?:optimal|best|correct|right|proper)\s+ratio\s+(?:for|of|to\s+(?:make|produce))\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"ratio\s+(?:for|of|to\s+(?:make|produce))\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"how\s+many\s+(?:assemblers?|machines?|furnaces?|refineries|chem\s*plants?)\s+(?:for|to\s+(?:make|produce|get))\s+(.+)", re.IGNORECASE),
+        re.compile(r"(?:set\s*up|layout|design)\s+(?:for|to\s+(?:make|produce))\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"how\s+(?:do\s+i\s+)?(?:produce|automate|mass\s*produce)\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
     ]
 
     def _extract_recipe_items(self, message: str) -> list[str]:
@@ -1353,8 +1359,13 @@ class Bridge:
             "Each entity needs 'entity_number', 'name', 'position' (with 'x' and 'y'). "
             "The version field should be 562949954076672 (for Factorio 2.0). "
             "Output the raw blueprint string — the bridge will save it for the player to import.",
+            "CRITICAL: NEVER guess or hallucinate Factorio recipes. When the player asks about "
+            "recipes, ratios, crafting, or how to build something, ONLY use recipe data provided "
+            "under 'VERIFIED GAME DATA' in this prompt. If no verified data is provided for an item, "
+            "say you need to look it up and ask the player to type 'recipe <item-name>'.",
             "When the player asks about ratios, production targets, or 'how many X do I need', "
-            "calculate exact numbers using the game state data. Key formulas: base assembler speeds "
+            "calculate exact numbers using VERIFIED GAME DATA recipes and the game state. "
+            "Key formulas: base assembler speeds "
             "are assembling-machine-1=0.5, assembling-machine-2=0.75, assembling-machine-3=1.25. "
             "Furnace speed: stone=1, steel=2, electric=2. Account for any productivity/speed bonuses "
             "shown in the game state. Show your math briefly.",
