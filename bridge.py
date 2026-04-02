@@ -632,17 +632,27 @@ class Bridge:
             print(f"  Game state query failed: {exc}")
         return None
 
+    # Lightweight alert query — no entity scanning, just force-level counts
+    Q_ALERT_FAST = (
+        "/sc local f=game.forces.player; local su=game.surfaces[1];"
+        " local d={turrets=f.get_entity_count('gun-turret')"
+        "   +f.get_entity_count('laser-turret'),"
+        "   walls=f.get_entity_count('stone-wall')+f.get_entity_count('gate'),"
+        "   research=f.current_research and f.current_research.name or 'none'};"
+        " rcon.print(helpers.table_to_json(d))"
+    )
+
     def _fetch_alert_state(self) -> dict | None:
-        """Query only the 3 cheap alert-critical data points via RCON."""
+        """Query cheap alert data: entity counts, trains, power. No entity scanning."""
         if not self.rcon:
             return None
         try:
-            defenses = self._rcon_json(self.Q_DEFENSES)
-            if defenses is None:
+            counts = self._rcon_json(self.Q_ALERT_FAST)
+            if counts is None:
                 return None
             trains = self._rcon_json(self.Q_TRAINS) or {}
             electric = self._rcon_json(self.Q_ELECTRIC) or {}
-            return {"defenses": defenses, "trains": trains, "electric": electric}
+            return {"counts": counts, "trains": trains, "electric": electric}
         except Exception as exc:
             print(f"  Alert state query failed: {exc}")
         return None
@@ -653,37 +663,34 @@ class Bridge:
             return self._cached_state
 
     def _check_critical_alerts(self, old_alert: dict | None, new_alert: dict):
-        """Compare alert states and return list of critical alert strings.
+        """Compare lightweight alert states and return critical alert strings.
 
-        Both old_alert and new_alert use the alert-state format with keys:
-        "defenses", "trains", "electric".
+        Alert state format: {"counts": {turrets, walls, research},
+                            "trains": {...}, "electric": {...}}
+        Uses force-level entity counts (O(1)) instead of scanning every entity.
         """
         if old_alert is None:
             return []
 
         alerts = []
 
-        # Empty turrets (new empties since last poll)
-        new_def = new_alert.get("defenses", {})
-        old_def = old_alert.get("defenses", {})
-        new_empty = new_def.get("empty", {})
-        old_empty = old_def.get("empty", {})
-        for coord, count in new_empty.items():
-            if count > old_empty.get(coord, 0):
-                alerts.append(f"EMPTY turrets at ({coord})! {count} with no ammo")
+        # Turrets or walls destroyed (count dropped)
+        new_c = new_alert.get("counts", {})
+        old_c = old_alert.get("counts", {})
+        old_walls = old_c.get("walls", 0)
+        new_walls = new_c.get("walls", 0)
+        if old_walls > 0 and new_walls < old_walls:
+            alerts.append(f"Walls destroyed! Lost {old_walls - new_walls} walls ({new_walls} remaining)")
 
-        # Walls destroyed (count dropped)
-        new_tw = new_def.get("tw", 0)
-        old_tw = old_def.get("tw", 0)
-        if old_tw > 0 and new_tw < old_tw:
-            alerts.append(f"Walls destroyed! {old_tw - new_tw} walls lost")
+        old_turrets = old_c.get("turrets", 0)
+        new_turrets = new_c.get("turrets", 0)
+        if old_turrets > 0 and new_turrets < old_turrets:
+            alerts.append(f"Turrets lost! Lost {old_turrets - new_turrets} turrets ({new_turrets} remaining)")
 
-        # New damaged walls
-        new_dmg = new_def.get("damaged", {})
-        old_dmg = old_def.get("damaged", {})
-        for coord, count in new_dmg.items():
-            if count > old_dmg.get(coord, 0):
-                alerts.append(f"Walls taking damage near ({coord})!")
+        # Research finished with nothing queued
+        if (new_c.get("research") == "none"
+                and old_c.get("research", "none") != "none"):
+            alerts.append(f"Research complete! Nothing queued — pick your next tech")
 
         # Trains stuck
         new_trains = new_alert.get("trains", {})
@@ -698,12 +705,12 @@ class Bridge:
                         f"route: {stops}"
                     )
 
-        # Power brownout (electric consumption > generation)
+        # Power brownout
         new_elec = new_alert.get("electric", {})
         econs = new_elec.get("consumption", {})
         eprod = new_elec.get("production", {})
         if econs and eprod:
-            gen = sum(econs.values())  # naming is swapped in Factorio API
+            gen = sum(econs.values())
             use = sum(eprod.values())
             if gen > 0 and use / gen > 0.95:
                 pct = round(use / gen * 100)
