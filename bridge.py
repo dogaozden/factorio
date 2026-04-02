@@ -1553,19 +1553,18 @@ class Bridge:
                 CLAUDE_BIN, "-p", "-c",
                 "--append-system-prompt", system_prompt,
                 "--allowedTools", "Read",
-                user_message,
             ]
         else:
             cmd = [
                 CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
                 "--system-prompt", system_prompt,
                 "--allowedTools", "Read",
-                user_message,
             ]
 
         try:
             result = subprocess.run(
                 cmd,
+                input=user_message,
                 capture_output=True,
                 text=True,
                 timeout=CLAUDE_TIMEOUT,
