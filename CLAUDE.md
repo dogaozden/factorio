@@ -76,3 +76,4 @@ Background thread refreshes every 30s; messages get cached state instantly.
 - When adding new RCON queries, check item/entity names exist in Factorio 2.0
 - Mod changes require Factorio restart; bridge.py changes only need bridge restart
 - After changing mod, run: `cp -r mod/claude-chat "$HOME/Library/Application Support/factorio/mods/claude-chat"`
+- **Update ARCHITECTURE.md** whenever you make a change that affects how the system works (new features, new data flows, changed polling intervals, new background loops, etc.). ARCHITECTURE.md is the non-technical overview for the user — keep it current.
