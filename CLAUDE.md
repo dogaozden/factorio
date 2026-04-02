@@ -73,6 +73,7 @@ Background thread refreshes every 30s; messages get cached state instantly.
 - Always test RCON queries against live game before committing
 - `python3 -c "import ast; ast.parse(open('bridge.py').read())"` to check syntax
 - Commit after each feature
+- **Version every commit.** Format: `vX.YZ` (e.g., v1.03). Include the version in the commit message. Bump more for big features (+0.05 to +0.10), less for small fixes/docs (+0.01). Check `git tag` for the current version before committing.
 - When adding new RCON queries, check item/entity names exist in Factorio 2.0
 - Mod changes require Factorio restart; bridge.py changes only need bridge restart
 - After changing mod, run: `cp -r mod/claude-chat "$HOME/Library/Application Support/factorio/mods/claude-chat"`
