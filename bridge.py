@@ -853,8 +853,8 @@ class Bridge:
 
     # -- Claude CLI --------------------------------------------------
 
-    def ask_claude(self, message: str, player: str) -> str:
-        """Send a message to Claude Code CLI and return the response."""
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt with personality, transcript, and live game state."""
         parts = [
             "You are Claude, chatting with a player inside Factorio through the game's chat.",
             "Keep responses concise (2-3 sentences max) — they appear in a small chat window.",
@@ -878,23 +878,29 @@ class Bridge:
             parts.append(self.format_game_context(state))
             parts.append("")
 
-        # Include recent conversation history
-        recent = self.history[-PROMPT_HISTORY:]
-        if recent:
-            parts.append("Recent conversation:")
-            for h in recent:
-                parts.append(f"  {h['role']}: {h['text']}")
-            parts.append("")
+        return "\n".join(parts)
 
-        parts.append(f"{player}: {message}")
-        parts.append("")
-        parts.append("Your response (concise, plain text):")
+    def ask_claude(self, message: str, player: str) -> str:
+        """Send a message to Claude Code CLI and return the response."""
+        system_prompt = self._build_system_prompt()
+        user_message = f"{player}: {message}"
 
-        prompt = "\n".join(parts)
+        if self.session_started:
+            cmd = [
+                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                "--append-system-prompt", system_prompt,
+                user_message,
+            ]
+        else:
+            cmd = [
+                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
+                "--system-prompt", system_prompt,
+                user_message,
+            ]
 
         try:
             result = subprocess.run(
-                [CLAUDE_BIN, "-p", prompt],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=CLAUDE_TIMEOUT,
@@ -903,6 +909,7 @@ class Bridge:
             if not response and result.returncode != 0:
                 stderr = result.stderr.strip()[:200]
                 return f"(Claude error: {stderr or 'empty response'})"
+            self.session_started = True
             return response or "(empty response)"
 
         except subprocess.TimeoutExpired:
@@ -1034,40 +1041,38 @@ class Bridge:
 
         print(f"\n--- [Auto check-in] ---\n{diff}")
 
-        parts = [
-            "You are Claude, an AI advisor embedded in a Factorio game.",
-            "The game just hit a 5-minute check-in. Below is what changed.",
-            "Give a SHORT (1-2 sentences) observation or suggestion.",
-            "Focus on what's interesting: bottlenecks, new production,",
-            "research changes, or strategy tips. Plain text, no markdown.",
-            "If nothing notable changed, just say something brief and encouraging.",
-            "",
-            "Changes since last check-in:",
-            diff,
-            "",
-            "Current full state:",
-            self.format_game_context(state),
-            "",
-        ]
+        system_prompt = self._build_system_prompt()
+        user_message = (
+            "[AUTO CHECK-IN] Game state changed in last 5 min:\n"
+            f"{diff}\n"
+            "Give a brief (1-2 sentence) observation or suggestion. "
+            "Focus on bottlenecks, new production, research changes, or strategy tips. "
+            "If nothing notable changed, just say something brief and encouraging."
+        )
 
-        if self.history:
-            parts.append("Recent conversation for context:")
-            for h in self.history[-6:]:
-                parts.append(f"  {h['role']}: {h['text']}")
-            parts.append("")
-
-        parts.append("Your brief check-in message:")
-        prompt = "\n".join(parts)
+        if self.session_started:
+            cmd = [
+                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                "--append-system-prompt", system_prompt,
+                user_message,
+            ]
+        else:
+            cmd = [
+                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
+                "--system-prompt", system_prompt,
+                user_message,
+            ]
 
         try:
             result = subprocess.run(
-                [CLAUDE_BIN, "-p", prompt],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=CLAUDE_TIMEOUT,
             )
             response = result.stdout.strip()
             if response:
+                self.session_started = True
                 ts = datetime.now(timezone.utc).isoformat()
                 self.history.append({"role": "Claude", "text": response, "ts": ts})
                 append_history({"role": "Claude", "text": response, "ts": ts})
