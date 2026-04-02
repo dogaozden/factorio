@@ -242,6 +242,7 @@ class Bridge:
         self.transcript: str = ""
         self.last_state: dict | None = None
         self.last_checkin: float = 0
+        self._alerted: set[str] = set()  # tracks which alerts have fired (dedup)
         self.last_narration: float = 0
         self.session_started = False
         self._cached_state: dict | None = None
@@ -767,10 +768,15 @@ class Bridge:
         if (new_c.get("research") == "none"
                 and old_c.get("research", "none") != "none"):
             alerts.append(f"Research complete! Nothing queued — pick your next tech")
+        elif new_c.get("research", "none") != "none":
+            self._alerted.discard("research")
 
         # Trains stuck
         new_trains = new_alert.get("trains", {})
         old_trains = old_alert.get("trains", {})
+        # Clear train alerts for trains that are no longer stuck
+        if new_trains.get("stuck", 0) == 0:
+            self._alerted = {k for k in self._alerted if not k.startswith("train-")}
         if new_trains.get("stuck", 0) > old_trains.get("stuck", 0):
             for t in new_trains.get("trains", []):
                 if t.get("state") in ("path_lost", "no_path", "no_schedule"):
@@ -791,12 +797,30 @@ class Bridge:
             if gen > 0 and use / gen > 0.95:
                 pct = round(use / gen * 100)
                 alerts.append(f"Power critical! Using {pct}% of generation capacity")
+            elif "power" in self._alerted:
+                # Power recovered — clear so it can fire again if it drops
+                self._alerted.discard("power")
 
         return alerts
 
     def _send_alert(self, alerts: list[str]):
-        """Send critical alerts directly to game chat. No Claude call."""
+        """Send critical alerts directly to game chat. Dedup: each alert fires once."""
         for alert in alerts:
+            # Create a dedup key from the alert category
+            if "Power" in alert:
+                key = "power"
+            elif "Train" in alert:
+                key = f"train-{alert}"
+            elif "Walls" in alert or "Turrets" in alert:
+                key = alert
+            elif "Research" in alert:
+                key = "research"
+            else:
+                key = alert
+
+            if key in self._alerted:
+                continue
+            self._alerted.add(key)
             msg = f"[ALERT] {alert}"
             print(f"  !!! {msg}")
             self.send_to_game(msg)
