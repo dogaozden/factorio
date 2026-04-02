@@ -13,8 +13,10 @@ Features:
 Zero external dependencies - uses only Python stdlib + the `claude` CLI.
 """
 
+import base64
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -22,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +43,7 @@ INPUT_FILE = SCRIPT_OUTPUT / "claude_chat.jsonl"
 PERSIST_DIR = Path.home() / ".claude-factorio"
 HISTORY_FILE = PERSIST_DIR / "history.jsonl"
 TRANSCRIPT_FILE = PERSIST_DIR / "transcript.txt"
+BLUEPRINT_DIR = PERSIST_DIR / "blueprints"
 
 CLAUDE_BIN = "/opt/homebrew/bin/claude"
 
@@ -203,6 +207,23 @@ def load_transcript() -> str:
 
 
 # ============================================================
+# Blueprint encoding / decoding
+# ============================================================
+
+def encode_blueprint(blueprint_json: dict) -> str:
+    """Encode a Factorio blueprint dict to an importable blueprint string."""
+    json_bytes = json.dumps(blueprint_json).encode("utf-8")
+    compressed = zlib.compress(json_bytes, level=9)
+    return "0" + base64.b64encode(compressed).decode("ascii")
+
+
+def decode_blueprint(blueprint_string: str) -> dict:
+    """Decode a Factorio blueprint string to a dict."""
+    raw = base64.b64decode(blueprint_string[1:])
+    return json.loads(zlib.decompress(raw))
+
+
+# ============================================================
 # Bridge
 # ============================================================
 
@@ -219,11 +240,13 @@ class Bridge:
         self.last_checkin: float = 0
         self.session_started = False
         self._cached_state: dict | None = None
+        self._alert_state: dict | None = None
         self._state_lock = threading.Lock()
 
     def init(self):
         """Load persistent state."""
         init_persistence()
+        BLUEPRINT_DIR.mkdir(parents=True, exist_ok=True)
         self.history = load_history()
         self.transcript = load_transcript()
 
@@ -609,21 +632,40 @@ class Bridge:
             print(f"  Game state query failed: {exc}")
         return None
 
+    def _fetch_alert_state(self) -> dict | None:
+        """Query only the 3 cheap alert-critical data points via RCON."""
+        if not self.rcon:
+            return None
+        try:
+            defenses = self._rcon_json(self.Q_DEFENSES)
+            if defenses is None:
+                return None
+            trains = self._rcon_json(self.Q_TRAINS) or {}
+            electric = self._rcon_json(self.Q_ELECTRIC) or {}
+            return {"defenses": defenses, "trains": trains, "electric": electric}
+        except Exception as exc:
+            print(f"  Alert state query failed: {exc}")
+        return None
+
     def query_game_state(self) -> dict | None:
         """Return the cached game state (refreshed every 30s by background poller)."""
         with self._state_lock:
             return self._cached_state
 
-    def _check_critical_alerts(self, old_state: dict | None, new_state: dict):
-        """Compare states and return list of critical alert strings, or empty."""
-        if old_state is None:
+    def _check_critical_alerts(self, old_alert: dict | None, new_alert: dict):
+        """Compare alert states and return list of critical alert strings.
+
+        Both old_alert and new_alert use the alert-state format with keys:
+        "defenses", "trains", "electric".
+        """
+        if old_alert is None:
             return []
 
         alerts = []
 
         # Empty turrets (new empties since last poll)
-        new_def = new_state.get("defenses", {})
-        old_def = old_state.get("defenses", {})
+        new_def = new_alert.get("defenses", {})
+        old_def = old_alert.get("defenses", {})
         new_empty = new_def.get("empty", {})
         old_empty = old_def.get("empty", {})
         for coord, count in new_empty.items():
@@ -644,8 +686,8 @@ class Bridge:
                 alerts.append(f"Walls taking damage near ({coord})!")
 
         # Trains stuck
-        new_trains = new_state.get("trains", {})
-        old_trains = old_state.get("trains", {})
+        new_trains = new_alert.get("trains", {})
+        old_trains = old_alert.get("trains", {})
         if new_trains.get("stuck", 0) > old_trains.get("stuck", 0):
             for t in new_trains.get("trains", []):
                 if t.get("state") in ("path_lost", "no_path", "no_schedule"):
@@ -923,6 +965,45 @@ class Bridge:
 
         return "\n".join(lines)
 
+    # -- Blueprint handling -------------------------------------------
+
+    _BLUEPRINT_RE = re.compile(r'0[eE][A-Za-z0-9+/=]{20,}')
+
+    def _handle_blueprint_response(self, response: str) -> str:
+        """Detect blueprint strings in Claude's response, save them, and replace inline."""
+        matches = self._BLUEPRINT_RE.findall(response)
+        if not matches:
+            return response
+
+        BLUEPRINT_DIR.mkdir(parents=True, exist_ok=True)
+
+        for bp_string in matches:
+            # Validate by attempting to decode
+            try:
+                decode_blueprint(bp_string)
+            except Exception:
+                continue
+
+            # Save with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            bp_file = BLUEPRINT_DIR / f"blueprint_{timestamp}.txt"
+            bp_file.write_text(bp_string)
+
+            # Also save as latest.txt for easy access
+            latest_file = BLUEPRINT_DIR / "latest.txt"
+            latest_file.write_text(bp_string)
+
+            print(f"  Blueprint saved to {bp_file}")
+
+            # Replace the long string in the response with a short notice
+            response = response.replace(
+                bp_string,
+                "(Blueprint saved to ~/.claude-factorio/blueprints/latest.txt"
+                " - copy and import in game with Ctrl+V)",
+            )
+
+        return response
+
     # -- Claude CLI --------------------------------------------------
 
     def _build_system_prompt(self) -> str:
@@ -932,6 +1013,12 @@ class Bridge:
             "Keep responses concise (2-3 sentences max) — they appear in a small chat window.",
             "No markdown, no bullet points, no code blocks. Plain text only.",
             "Be helpful, friendly, and knowledgeable about Factorio and anything else.",
+            "When asked for blueprints, generate valid Factorio blueprint strings. "
+            "A blueprint string starts with '0' followed by base64-encoded zlib-compressed JSON. "
+            "The JSON structure has a 'blueprint' key containing 'entities', 'icons', 'item', and 'version' fields. "
+            "Each entity needs 'entity_number', 'name', 'position' (with 'x' and 'y'). "
+            "The version field should be 562949954076672 (for Factorio 2.0). "
+            "Output the raw blueprint string — the bridge will save it for the player to import.",
             "",
         ]
 
@@ -982,7 +1069,9 @@ class Bridge:
                 stderr = result.stderr.strip()[:200]
                 return f"(Claude error: {stderr or 'empty response'})"
             self.session_started = True
-            return response or "(empty response)"
+            response = response or "(empty response)"
+            response = self._handle_blueprint_response(response)
+            return response
 
         except subprocess.TimeoutExpired:
             return "Sorry, I took too long thinking! Try a shorter question."
