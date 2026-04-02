@@ -699,7 +699,7 @@ class Bridge:
                     )
 
         # Power brownout (electric consumption > generation)
-        new_elec = new_state.get("electric", {})
+        new_elec = new_alert.get("electric", {})
         econs = new_elec.get("consumption", {})
         eprod = new_elec.get("production", {})
         if econs and eprod:
@@ -708,11 +708,6 @@ class Bridge:
             if gen > 0 and use / gen > 0.95:
                 pct = round(use / gen * 100)
                 alerts.append(f"Power critical! Using {pct}% of generation capacity")
-
-        # No research set
-        if (new_state.get("current_research", "none") == "none"
-                and old_state.get("current_research", "none") != "none"):
-            alerts.append("Research finished and nothing queued!")
 
         return alerts
 
@@ -724,28 +719,44 @@ class Bridge:
             self.send_to_game(msg)
 
     def _state_poll_loop(self):
-        """Background loop: refresh cached game state every 30 seconds."""
+        """Background loop: 5s alert checks, 30s full state refresh.
+
+        Every 5 seconds: fetch cheap alert state (defenses, trains, power),
+        compare against previous alert snapshot, fire alerts on changes.
+
+        Every 6th iteration (30 seconds): also fetch full 15-query game
+        state and update self._cached_state for Claude prompts.
+        """
+        tick_counter = 0
         while True:
-            time.sleep(30)
+            time.sleep(5)
             if self._paused:
                 continue
-            state = self._fetch_game_state()
-            if state is not None:
-                old_state = self.query_game_state()
-                # Check for critical alerts before updating cache
-                alerts = self._check_critical_alerts(old_state, state)
-                with self._state_lock:
-                    self._cached_state = state
-                tick = state.get("game_time", "?")
-                print(f"  [state poller] refreshed (game time: {tick})")
+
+            # --- Alert poll (every 5s) ---
+            alert_snap = self._fetch_alert_state()
+            if alert_snap is not None:
+                alerts = self._check_critical_alerts(self._alert_state, alert_snap)
+                self._alert_state = alert_snap
                 if alerts:
                     self._send_alert(alerts)
+
+            # --- Full state poll (every 30s) ---
+            tick_counter += 1
+            if tick_counter >= 6:
+                tick_counter = 0
+                state = self._fetch_game_state()
+                if state is not None:
+                    with self._state_lock:
+                        self._cached_state = state
+                    game_time = state.get("game_time", "?")
+                    print(f"  [state poller] refreshed (game time: {game_time})")
 
     def _start_state_poller(self):
         """Start the background game-state polling thread."""
         t = threading.Thread(target=self._state_poll_loop, daemon=True)
         t.start()
-        print("State poller started (30s interval)")
+        print("State poller started (5s alerts, 30s full refresh)")
 
     @staticmethod
     def format_game_context(state: dict) -> str:
