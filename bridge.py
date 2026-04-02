@@ -1232,6 +1232,112 @@ class Bridge:
 
         return response
 
+    # -- Recipe lookup from game data ---------------------------------
+
+    def _lookup_recipe(self, item_name: str) -> str | None:
+        """Look up a recipe from Factorio's prototype data via RCON.
+
+        Returns a human-readable string like:
+            "Recipe for tank: 32x steel-plate, 15x engine-unit, ..."
+        Returns None if the recipe is not found or on error.
+        """
+        if not self.rcon:
+            return None
+
+        # Sanitize: only allow alphanumeric + hyphens to prevent Lua injection
+        safe_name = re.sub(r"[^a-z0-9\-]", "", item_name.lower())
+        if not safe_name:
+            return None
+
+        lua = (
+            f"/sc local r=prototypes.recipe['{safe_name}']"
+            f" if not r then r=game.recipe_prototypes"
+            f" and game.recipe_prototypes['{safe_name}'] end"
+            " if not r then rcon.print('NOT_FOUND') return end"
+            " local d={name=r.name,energy=r.energy,"
+            "category=r.category,ingredients={},products={}}"
+            " for _,i in pairs(r.ingredients) do"
+            " d.ingredients[#d.ingredients+1]="
+            "{name=i.name,amount=i.amount,type=i.type} end"
+            " for _,p in pairs(r.products) do"
+            " d.products[#d.products+1]="
+            "{name=p.name,amount=p.amount,type=p.type} end"
+            " rcon.print(helpers.table_to_json(d))"
+        )
+
+        try:
+            raw = self.rcon.send_command(lua)
+            if not raw or raw.strip() == "NOT_FOUND":
+                return None
+            data = json.loads(raw)
+        except Exception as exc:
+            print(f"  Recipe lookup error for '{safe_name}': {exc}")
+            return None
+
+        # Format ingredients
+        ingredients = []
+        for ing in data.get("ingredients", []):
+            amt = ing.get("amount", 1)
+            name = ing.get("name", "?")
+            itype = ing.get("type", "item")
+            suffix = " (fluid)" if itype == "fluid" else ""
+            ingredients.append(f"{amt}x {name}{suffix}")
+
+        # Format products
+        products = []
+        for prod in data.get("products", []):
+            amt = prod.get("amount", 1)
+            name = prod.get("name", "?")
+            ptype = prod.get("type", "item")
+            suffix = " (fluid)" if ptype == "fluid" else ""
+            if amt != 1:
+                products.append(f"{amt}x {name}{suffix}")
+            else:
+                products.append(f"{name}{suffix}")
+
+        recipe_name = data.get("name", safe_name)
+        energy = data.get("energy", "?")
+        category = data.get("category", "crafting")
+
+        result = f"Recipe for {recipe_name}: {', '.join(ingredients)}."
+        if len(products) == 1 and products[0] == recipe_name:
+            pass  # skip if product is same as recipe name (the common case)
+        else:
+            result += f" Produces: {', '.join(products)}."
+        result += f" Craft time: {energy}s. Category: {category}"
+        return result
+
+    # Patterns to detect recipe questions in player messages
+    _RECIPE_PATTERNS = [
+        re.compile(r"recipe\s+(?:for\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"how\s+(?:do\s+(?:i|you)\s+)?(?:craft|make|build|create)\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"what\s+(?:do\s+(?:i|you)\s+)?need\s+(?:for|to\s+(?:make|craft|build))\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"ingredients?\s+(?:for|of|in)\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"how\s+many\s+\S+\s+(?:to|for)\s+(?:make|craft|build)\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"what(?:'s| is)\s+(?:the\s+)?recipe\s+(?:for\s+)?(.+)", re.IGNORECASE),
+        re.compile(r"what\s+goes\s+into\s+(?:a\s+|an\s+)?(.+)", re.IGNORECASE),
+    ]
+
+    def _extract_recipe_items(self, message: str) -> list[str]:
+        """Detect recipe-related questions and extract item names.
+
+        Returns a list of normalized item names (lowercase, spaces->hyphens).
+        """
+        items = []
+        for pattern in self._RECIPE_PATTERNS:
+            m = pattern.search(message)
+            if m:
+                raw = m.group(1).strip()
+                # Remove trailing punctuation and filler words
+                raw = re.sub(r"[?.!]+$", "", raw).strip()
+                raw = re.sub(r"\s+(?:please|pls|plz|thx|thanks)$", "", raw, flags=re.IGNORECASE).strip()
+                if raw:
+                    # Normalize: lowercase, spaces to hyphens
+                    normalized = raw.lower().replace(" ", "-")
+                    if normalized not in items:
+                        items.append(normalized)
+        return items
+
     # -- Claude CLI --------------------------------------------------
 
     def _build_system_prompt(self) -> str:
@@ -1292,6 +1398,23 @@ class Bridge:
     def ask_claude(self, message: str, player: str) -> str:
         """Send a message to Claude Code CLI and return the response."""
         system_prompt = self._build_system_prompt()
+
+        # Auto-detect recipe questions and inject verified game data
+        recipe_items = self._extract_recipe_items(message)
+        if recipe_items:
+            verified = []
+            for item in recipe_items:
+                recipe_str = self._lookup_recipe(item)
+                if recipe_str:
+                    verified.append(recipe_str)
+            if verified:
+                system_prompt += (
+                    "\n\nVERIFIED GAME DATA — these are the actual recipes "
+                    "from the game, do not guess or modify them:\n"
+                    + "\n".join(verified)
+                    + "\n"
+                )
+
         user_message = f"{player}: {message}"
 
         if self.session_started:
@@ -1477,8 +1600,25 @@ class Bridge:
             self._handle_screenshot(player, question)
             return
 
-        # Check for goal commands (case insensitive)
+        # Direct recipe lookup: "recipe <item>" — no Claude call needed
         text_lower = text.lower().strip()
+        if text_lower.startswith("recipe:") or text_lower.startswith("recipe "):
+            sep = ":" if text_lower.startswith("recipe:") else " "
+            item_raw = text[text.index(sep) + 1:].strip()
+            if item_raw:
+                item_name = item_raw.lower().replace(" ", "-")
+                print(f"  -> Direct recipe lookup: {item_name}")
+                recipe_str = self._lookup_recipe(item_name)
+                if recipe_str:
+                    self.send_to_game(recipe_str)
+                else:
+                    self.send_to_game(
+                        f"No recipe found for '{item_name}'. "
+                        "Check the item name (use hyphens, e.g. 'recipe iron-gear-wheel')."
+                    )
+                return
+
+        # Check for goal commands (case insensitive)
         if text_lower.startswith("goal:"):
             goal_body = text[len("goal:"):].strip()
             goal_body_lower = goal_body.lower()
