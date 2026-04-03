@@ -58,8 +58,8 @@ RCON_CONNECT_RETRIES = 60    # how many times to retry RCON connection
 RCON_RETRY_DELAY = 2         # seconds between retries
 MAX_TRANSCRIPT_CHARS = 4000  # max transcript chars to include in prompt
 
-# Fresh session ID each bridge run — use --continue for subsequent messages
-SESSION_ID = str(uuid.uuid4())
+# Deterministic session ID — same conversation persists across bridge restarts
+SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "factorio-claude-chat"))
 
 
 # ============================================================
@@ -1430,14 +1430,52 @@ class Bridge:
                 "--allowedTools", "Read,Bash",
             ]
         else:
+            # First call: try to resume existing session, fall back to new
             cmd = [
-                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
-                "--system-prompt", system_prompt,
+                CLAUDE_BIN, "-p", "-r", SESSION_ID,
+                "--append-system-prompt", system_prompt,
                 "--allowedTools", "Read,Bash",
             ]
         if extra_flags:
             cmd.extend(extra_flags)
         return cmd
+
+    def _run_claude(self, system_prompt: str, user_message: str,
+                    extra_flags: list[str] | None = None) -> str:
+        """Run claude CLI with session handling and retry logic."""
+        cmd = self._claude_cmd(system_prompt, extra_flags)
+        try:
+            result = subprocess.run(
+                cmd, input=user_message,
+                capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+            )
+            stderr = result.stderr.strip()
+            # If session is in use, fall back to --continue
+            if "already in use" in stderr and not self.session_started:
+                print("  Session in use, falling back to --continue")
+                cmd = [
+                    CLAUDE_BIN, "-p", "-c",
+                    "--append-system-prompt", system_prompt,
+                    "--allowedTools", "Read,Bash",
+                ]
+                if extra_flags:
+                    cmd.extend(extra_flags)
+                result = subprocess.run(
+                    cmd, input=user_message,
+                    capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+                )
+            response = result.stdout.strip()
+            if not response and result.returncode != 0:
+                stderr = result.stderr.strip()[:200]
+                return f"(Claude error: {stderr or 'empty response'})"
+            self.session_started = True
+            return response or "(empty response)"
+        except subprocess.TimeoutExpired:
+            return "Sorry, I took too long thinking! Try a shorter question."
+        except FileNotFoundError:
+            return f"Error: claude CLI not found at {CLAUDE_BIN}"
+        except Exception as exc:
+            return f"Error: {str(exc)[:200]}"
 
     def ask_claude(self, message: str, player: str) -> str:
         """Send a message to Claude Code CLI and return the response."""
@@ -1460,31 +1498,8 @@ class Bridge:
                 )
 
         user_message = f"{player}: {message}"
-        cmd = self._claude_cmd(system_prompt)
-
-        try:
-            result = subprocess.run(
-                cmd,
-                input=user_message,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_TIMEOUT,
-            )
-            response = result.stdout.strip()
-            if not response and result.returncode != 0:
-                stderr = result.stderr.strip()[:200]
-                return f"(Claude error: {stderr or 'empty response'})"
-            self.session_started = True
-            response = response or "(empty response)"
-            response = self._handle_blueprint_response(response)
-            return response
-
-        except subprocess.TimeoutExpired:
-            return "Sorry, I took too long thinking! Try a shorter question."
-        except FileNotFoundError:
-            return f"Error: claude CLI not found at {CLAUDE_BIN}"
-        except Exception as exc:
-            return f"Error: {str(exc)[:200]}"
+        response = self._run_claude(system_prompt, user_message)
+        return self._handle_blueprint_response(response)
 
     # -- File monitoring ---------------------------------------------
 
@@ -1567,32 +1582,10 @@ class Bridge:
         self.history.append(player_entry)
         append_history(player_entry)
 
-        # Call Claude using the same session approach as ask_claude()
+        # Call Claude using the shared session
         system_prompt = self._build_system_prompt()
-        cmd = self._claude_cmd(system_prompt)
-
-        try:
-            result = subprocess.run(
-                cmd,
-                input=user_message,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_TIMEOUT,
-            )
-            response = result.stdout.strip()
-            if not response and result.returncode != 0:
-                stderr = result.stderr.strip()[:200]
-                response = f"(Claude error: {stderr or 'empty response'})"
-            else:
-                self.session_started = True
-                response = response or "(empty response)"
-                response = self._handle_blueprint_response(response)
-        except subprocess.TimeoutExpired:
-            response = "Sorry, screenshot analysis took too long! Try again."
-        except FileNotFoundError:
-            response = f"Error: claude CLI not found at {CLAUDE_BIN}"
-        except Exception as exc:
-            response = f"Error: {str(exc)[:200]}"
+        response = self._run_claude(system_prompt, user_message)
+        response = self._handle_blueprint_response(response)
 
         # Save Claude response to persistent history
         claude_entry = {"role": "Claude", "text": response, "ts": ts}
@@ -1771,19 +1764,9 @@ class Bridge:
             "If nothing notable changed, just say something brief and encouraging."
         )
 
-        cmd = self._claude_cmd(system_prompt)
-
         try:
-            result = subprocess.run(
-                cmd,
-                input=user_message,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_TIMEOUT,
-            )
-            response = result.stdout.strip()
-            if response:
-                self.session_started = True
+            response = self._run_claude(system_prompt, user_message)
+            if response and not response.startswith("(Claude error"):
                 ts = datetime.now(timezone.utc).isoformat()
                 self.history.append({"role": "Claude", "text": response, "ts": ts})
                 append_history({"role": "Claude", "text": response, "ts": ts})
@@ -1818,28 +1801,11 @@ class Bridge:
             "Give 8-15 names covering the major areas and systems."
         )
 
-        if self.session_started:
-            cmd = [
-                CLAUDE_BIN, "-p", "-c",
-                "--append-system-prompt", system_prompt,
-                naming_prompt,
-            ]
-        else:
-            cmd = [
-                CLAUDE_BIN, "-p", "--session-id", SESSION_ID,
-                "--system-prompt", system_prompt,
-                naming_prompt,
-            ]
-
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
-            )
-            response = result.stdout.strip()
-            if not response:
+            response = self._run_claude(system_prompt, naming_prompt)
+            if not response or response.startswith("(Claude error"):
                 self.send_to_game("Naming failed — Claude had no words (for once).")
                 return
-            self.session_started = True
 
             # Parse the ORIGINAL -> NEW_NAME lines
             names = {}
@@ -1907,15 +1873,9 @@ class Bridge:
             f"Changes in the last 10 minutes:\n{diff}"
         )
 
-        cmd = self._claude_cmd(system_prompt)
-
         try:
-            result = subprocess.run(
-                cmd, input=user_message, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
-            )
-            response = result.stdout.strip()
-            if response:
-                self.session_started = True
+            response = self._run_claude(system_prompt, user_message)
+            if response and not response.startswith("(Claude error"):
                 ts = datetime.now(timezone.utc).isoformat()
                 self.history.append({"role": "Claude", "text": response, "ts": ts})
                 append_history({"role": "Claude", "text": response, "ts": ts})
